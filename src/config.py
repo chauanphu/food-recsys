@@ -1,0 +1,61 @@
+"""Configuration module for the Food Recommendation System.
+
+Loads environment variables from .env file and provides
+configuration settings for all services.
+"""
+
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+
+class Config:
+    """Application configuration loaded from environment variables."""
+
+    # Gemini API Configuration
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+
+    # Neo4j Database Configuration
+    NEO4J_URI: str = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+    NEO4J_USER: str = os.getenv("NEO4J_USER", "neo4j")
+    NEO4J_PASSWORD: str = os.getenv("NEO4J_PASSWORD", "")
+
+    # Flask Configuration
+    FLASK_ENV: str = os.getenv("FLASK_ENV", "development")
+    FLASK_DEBUG: bool = os.getenv("FLASK_DEBUG", "0") == "1"
+    FLASK_HOST: str = os.getenv("FLASK_HOST", "0.0.0.0")
+    FLASK_PORT: int = int(os.getenv("FLASK_PORT", "5000"))
+
+    # File Upload Configuration
+    MAX_CONTENT_LENGTH: int = int(os.getenv("MAX_CONTENT_LENGTH", str(16 * 1024 * 1024)))  # 16MB
+    TEMP_UPLOAD_DIR: Path = Path(os.getenv("TEMP_UPLOAD_DIR", "/tmp/food-recsys/uploads"))
+    ALLOWED_EXTENSIONS: set[str] = {"png", "jpg", "jpeg", "webp", "gif"}
+
+    # Batch Processing Configuration
+    MAX_WORKERS: int = 5
+
+    @classmethod
+    def validate(cls) -> list[str]:
+        """Validate that all required configuration is present.
+
+        Returns:
+            List of missing configuration keys.
+        """
+        missing = []
+        if not cls.GEMINI_API_KEY:
+            missing.append("GEMINI_API_KEY")
+        if not cls.NEO4J_PASSWORD:
+            missing.append("NEO4J_PASSWORD")
+        return missing
+
+    @classmethod
+    def ensure_temp_dir(cls) -> None:
+        """Ensure the temporary upload directory exists."""
+        cls.TEMP_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# Create singleton config instance
+config = Config()
