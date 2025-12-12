@@ -33,15 +33,20 @@ Content-Type: multipart/form-data
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | `images` | file[] | Yes | One or more image files (png, jpg, jpeg, webp, gif) |
-| `descriptions` | string[] | No | Descriptions for each image (matching order) |
+| `names` | string[] | No | Dish names for each image (matching order) |
+| `descriptions` | string[] | **Recommended** | Descriptions for each image - **required for ingredient extraction** |
+
+> **Note:** The `descriptions` field is required for Gemini to extract ingredients. Without it, only the image embedding (via CLIP) will be generated.
 
 **Example:**
 ```bash
 curl -X POST "http://localhost:8000/api/v1/dishes/upload" \
   -F "images=@pizza.jpg" \
   -F "images=@sushi.jpg" \
-  -F "descriptions=Margherita pizza" \
-  -F "descriptions=Salmon nigiri"
+  -F "names=Margherita Pizza" \
+  -F "names=Salmon Nigiri" \
+  -F "descriptions=Traditional Italian pizza with tomato, mozzarella, and fresh basil" \
+  -F "descriptions=Fresh salmon on seasoned rice with wasabi"
 ```
 
 **Response:**
@@ -52,7 +57,8 @@ curl -X POST "http://localhost:8000/api/v1/dishes/upload" \
       "id": "550e8400-e29b-41d4-a716-446655440000",
       "original_name": "pizza.jpg",
       "temp_path": "/tmp/food-recsys/uploads/550e8400-e29b-41d4-a716-446655440000.jpg",
-      "description": "Margherita pizza"
+      "name": "Margherita Pizza",
+      "description": "Traditional Italian pizza with tomato, mozzarella, and fresh basil"
     }
   ],
   "errors": [],
@@ -77,11 +83,14 @@ Content-Type: application/json
     {
       "id": "550e8400-e29b-41d4-a716-446655440000",
       "temp_path": "/tmp/food-recsys/uploads/550e8400.jpg",
-      "description": "Optional description"
+      "name": "Optional dish name",
+      "description": "Text description - required for Gemini ingredient extraction"
     }
   ]
 }
 ```
+
+> **Note:** The `description` field is required for ingredient extraction via Gemini. The `name` field is optional and will be extracted from the description if not provided.
 
 **Response (202 Accepted):**
 ```json
@@ -104,11 +113,24 @@ Content-Type: multipart/form-data
 
 Combines upload and process in a single request.
 
+**Parameters:**
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `images` | file[] | Yes | One or more image files |
+| `names` | string[] | No | Dish names for each image (matching order) |
+| `descriptions` | string[] | **Recommended** | Descriptions - **required for ingredient extraction** |
+
+**Processing Flow:**
+1. **Gemini API**: Extracts ingredients from text descriptions
+2. **CLIP**: Generates 512-dim image embeddings for visual similarity
+3. **Neo4j**: Stores dish with ingredients and embedding
+
 **Example:**
 ```bash
 curl -X POST "http://localhost:8000/api/v1/dishes/upload-and-process" \
   -F "images=@dish.jpg" \
-  -F "descriptions=Homemade pasta with tomato sauce"
+  -F "names=Pasta Pomodoro" \
+  -F "descriptions=Homemade pasta with fresh tomato sauce, basil, and parmesan"
 ```
 
 **Response (202 Accepted):**

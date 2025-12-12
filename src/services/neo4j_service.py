@@ -107,6 +107,7 @@ class Neo4jService:
         ingredients: list[str],
         description: str | None = None,
         image_url: str | None = None,
+        image_embedding: list[float] | None = None,
         country: str | None = None,
         max_retries: int = 3,
     ) -> dict[str, Any]:
@@ -121,6 +122,7 @@ class Neo4jService:
             ingredients: List of ingredient names.
             description: Optional description of the dish.
             image_url: Optional URL/path to dish image.
+            image_embedding: Optional CLIP image embedding vector.
             country: Optional country of origin.
             max_retries: Maximum retry attempts for transient errors.
 
@@ -137,12 +139,14 @@ class Neo4jService:
             d.name = $name,
             d.description = $description,
             d.image_url = $image_url,
+            d.image_embedding = $image_embedding,
             d.created_at = datetime()
         ON MATCH SET
             d.updated_at = datetime(),
             d.name = COALESCE($name, d.name),
             d.description = COALESCE($description, d.description),
-            d.image_url = COALESCE($image_url, d.image_url)
+            d.image_url = COALESCE($image_url, d.image_url),
+            d.image_embedding = COALESCE($image_embedding, d.image_embedding)
 
         // Process each ingredient
         WITH d
@@ -162,6 +166,7 @@ class Neo4jService:
             "name": name,
             "description": description,
             "image_url": image_url,
+            "image_embedding": image_embedding,
             "ingredients": ingredients,
         }
 
@@ -226,6 +231,7 @@ class Neo4jService:
                 - ingredients: List of ingredient names
                 - description: Optional description
                 - image_url: Optional image URL
+                - image_embedding: Optional CLIP embedding vector
 
         Returns:
             List of successfully merged dish IDs.
@@ -239,6 +245,7 @@ class Neo4jService:
             d.name = dish.name,
             d.description = dish.description,
             d.image_url = dish.image_url,
+            d.image_embedding = dish.image_embedding,
             d.created_at = datetime()
         ON MATCH SET
             d.updated_at = datetime()

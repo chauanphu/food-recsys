@@ -17,6 +17,7 @@ from typing import Any
 from src.config import config
 from src.services.gemini_extractor import GeminiExtractor
 from src.services.neo4j_service import Neo4jService
+from src.services.clip_embedder import CLIPEmbedder, get_clip_embedder
 
 
 class ProcessingStatus(Enum):
@@ -38,6 +39,7 @@ class ProcessingResult:
     dish_id: str | None = None
     dish_name: str | None = None
     ingredients: list[str] = field(default_factory=list)
+    image_embedding: list[float] | None = None
     error: str | None = None
     temp_path: str | None = None
 
@@ -91,6 +93,7 @@ class BatchJob:
                     "dish_id": v.dish_id,
                     "dish_name": v.dish_name,
                     "ingredients": v.ingredients,
+                    "has_embedding": v.image_embedding is not None,
                     "error": v.error,
                 }
                 for k, v in self.results.items()
@@ -99,11 +102,12 @@ class BatchJob:
 
 
 class BatchProcessor:
-    """Processor for batch ingredient extraction jobs."""
+    """Processor for batch ingredient extraction and image embedding jobs."""
 
     def __init__(
         self,
         gemini_extractor: GeminiExtractor | None = None,
+        clip_embedder: CLIPEmbedder | None = None,
         neo4j_service: Neo4jService | None = None,
         max_workers: int | None = None,
     ):
@@ -111,10 +115,12 @@ class BatchProcessor:
 
         Args:
             gemini_extractor: Gemini extractor service instance.
+            clip_embedder: CLIP embedder service instance.
             neo4j_service: Neo4j service instance.
             max_workers: Maximum concurrent workers. Defaults to config value.
         """
         self._gemini = gemini_extractor
+        self._clip = clip_embedder
         self._neo4j = neo4j_service
         self._max_workers = max_workers or config.MAX_WORKERS
 
@@ -128,6 +134,13 @@ class BatchProcessor:
         if self._gemini is None:
             self._gemini = GeminiExtractor()
         return self._gemini
+
+    @property
+    def clip(self) -> CLIPEmbedder:
+        """Get or create CLIP embedder instance."""
+        if self._clip is None:
+            self._clip = get_clip_embedder()
+        return self._clip
 
     @property
     def neo4j(self) -> Neo4jService:
@@ -153,45 +166,62 @@ class BatchProcessor:
         item_id: str,
         temp_path: str,
         description: str | None = None,
+        dish_name: str | None = None,
     ) -> ProcessingResult:
-        """Process a single image/description item.
+        """Process a single dish item.
+
+        Performs two AI operations:
+        1. Extract ingredients from description using Gemini API (text-only)
+        2. Generate image embedding using CLIP (for visual similarity)
+
+        Design:
+        - Gemini: Analyzes text descriptions to extract ingredients
+        - CLIP: Generates image embeddings for visual similarity search
 
         Args:
             item_id: Unique identifier for the item.
             temp_path: Path to the temporary image file.
-            description: Optional text description.
+            description: Text description of the dish (required for ingredient extraction).
+            dish_name: Optional dish name (will be extracted from description if not provided).
 
         Returns:
-            ProcessingResult with extraction and storage results.
+            ProcessingResult with extraction, embedding, and storage results.
         """
         try:
-            # Extract ingredients using Gemini
+            # Step 1: Extract ingredients using Gemini (from description only)
+            extraction = None
             if description:
-                extraction = self.gemini.extract_from_image_and_description(
-                    temp_path, description
-                )
-            else:
-                extraction = self.gemini.extract_from_image(temp_path)
+                extraction = self.gemini.extract_from_description(description)
+            
+            # Use provided dish_name or extracted one, or default
+            final_dish_name = dish_name or (extraction.get("dish_name") if extraction else None) or "Unknown Dish"
+            ingredients = extraction.get("ingredients", []) if extraction else []
+            cuisine = extraction.get("cuisine") if extraction else None
+
+            # Step 2: Generate image embedding using CLIP
+            image_embedding = self.clip.embed_image(temp_path)
 
             # Generate dish_id
             dish_id = str(uuid.uuid4())
 
-            # Store in Neo4j
+            # Step 3: Store in Neo4j with embedding
             self.neo4j.merge_dish_with_ingredients(
                 dish_id=dish_id,
-                name=extraction["dish_name"],
-                ingredients=extraction["ingredients"],
+                name=final_dish_name,
+                ingredients=ingredients,
                 description=description,
                 image_url=temp_path,
-                country=extraction.get("cuisine"),
+                image_embedding=image_embedding,
+                country=cuisine,
             )
 
             return ProcessingResult(
                 item_id=item_id,
                 success=True,
                 dish_id=dish_id,
-                dish_name=extraction["dish_name"],
-                ingredients=extraction["ingredients"],
+                dish_name=final_dish_name,
+                ingredients=ingredients,
+                image_embedding=image_embedding,
                 temp_path=temp_path,
             )
 
@@ -227,7 +257,8 @@ class BatchProcessor:
             items: List of items to process, each with:
                 - id: Unique item identifier
                 - temp_path: Path to temporary image file
-                - description: Optional text description
+                - description: Text description (required for ingredient extraction)
+                - name: Optional dish name
         """
         job = self._jobs[job_id]
 
@@ -243,6 +274,7 @@ class BatchProcessor:
                     item["id"],
                     item["temp_path"],
                     item.get("description"),
+                    item.get("name"),
                 ): item
                 for item in items
             }
@@ -283,7 +315,8 @@ class BatchProcessor:
             items: List of items to process, each with:
                 - id: Unique item identifier
                 - temp_path: Path to temporary image file
-                - description: Optional text description
+                - description: Text description (required for ingredient extraction)
+                - name: Optional dish name
 
         Returns:
             The job ID for tracking progress.
@@ -308,18 +341,20 @@ class BatchProcessor:
         self,
         temp_path: str,
         description: str | None = None,
+        dish_name: str | None = None,
     ) -> ProcessingResult:
         """Process a single item synchronously.
 
         Args:
             temp_path: Path to the image file.
-            description: Optional text description.
+            description: Text description (required for ingredient extraction).
+            dish_name: Optional dish name.
 
         Returns:
             ProcessingResult with extraction and storage results.
         """
         item_id = str(uuid.uuid4())
-        result = self._process_single_item(item_id, temp_path, description)
+        result = self._process_single_item(item_id, temp_path, description, dish_name)
 
         # Cleanup on success
         if result.success:

@@ -6,6 +6,7 @@ Provides FastAPI application factory and CLI commands for:
 """
 
 import argparse
+import logging
 import sys
 
 import uvicorn
@@ -15,6 +16,17 @@ from src.config import config
 from src.api.routes import router
 from src.services.neo4j_service import Neo4jService
 from src.pipeline.batch_processor import get_processor
+
+
+# Configure logging to file for background job debugging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("food-recsys.log"),
+    ],
+)
 
 
 def create_app() -> FastAPI:

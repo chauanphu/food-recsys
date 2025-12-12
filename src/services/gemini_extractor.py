@@ -1,42 +1,32 @@
-"""Gemini API service for extracting ingredients from images and text.
+"""Gemini API service for extracting ingredients from text descriptions.
 
-Uses Google's Gemini multimodal API to analyze dish images and
-descriptions to extract ingredient lists.
+Uses Google's Gemini API to analyze dish descriptions and extract
+ingredient lists. Image analysis is handled separately by CLIP.
+
+Design Principle:
+- Gemini API: Text/description-based ingredient extraction
+- CLIP: Image embeddings for visual similarity
 """
 
 import json
+import logging
 import re
-from pathlib import Path
 from typing import Any
 
 import google.generativeai as genai
-from PIL import Image
+
+# Configure logger for this module
+logger = logging.getLogger(__name__)
 
 from src.config import config
 
 
 class GeminiExtractor:
-    """Service for extracting ingredients using Gemini API."""
+    """Service for extracting ingredients from text descriptions using Gemini API.
 
-    # Prompt template for ingredient extraction from images
-    IMAGE_PROMPT = """Analyze this food dish image and extract all visible or likely ingredients.
-
-Return a JSON object with the following structure:
-{
-    "dish_name": "Name of the dish if identifiable, otherwise 'Unknown Dish'",
-    "ingredients": ["ingredient1", "ingredient2", ...],
-    "cuisine": "Type of cuisine if identifiable (e.g., 'Italian', 'Japanese'), otherwise null",
-    "confidence": "high" | "medium" | "low"
-}
-
-Guidelines:
-- List all ingredients you can identify or reasonably infer from the dish
-- Use lowercase for ingredient names
-- Be specific (e.g., "olive oil" not just "oil", "parmesan cheese" not just "cheese")
-- Include seasonings and garnishes if visible
-- If you cannot identify any ingredients, return an empty list
-
-Respond with ONLY the JSON object, no additional text."""
+    This class focuses solely on text-based ingredient extraction.
+    For image processing, use the CLIPEmbedder service.
+    """
 
     # Prompt template for ingredient extraction from text descriptions
     TEXT_PROMPT = """Extract all ingredients mentioned in this food dish description.
@@ -94,56 +84,31 @@ Respond with ONLY the JSON object, no additional text."""
         Raises:
             ValueError: If JSON parsing fails.
         """
+        # Log the raw response for debugging
+        logger.debug("Raw Gemini response:\n%s", text)
+        
         # Remove markdown code blocks if present
         text = text.strip()
         if text.startswith("```"):
             # Remove ```json or ``` at start and ``` at end
             text = re.sub(r"^```(?:json)?\s*\n?", "", text)
             text = re.sub(r"\n?```\s*$", "", text)
+            text = text.strip()
+
+        # Try to find JSON object if response has extra text
+        # Look for pattern starting with { and ending with }
+        json_match = re.search(r'\{.*\}', text, re.DOTALL)
+        if json_match:
+            text = json_match.group(0)
+        
+        logger.debug("Cleaned text for JSON parsing:\n%s", text)
 
         try:
             return json.loads(text)
         except json.JSONDecodeError as e:
-            raise ValueError(f"Failed to parse Gemini response as JSON: {e}")
-
-    def extract_from_image(
-        self,
-        image_path: str | Path,
-    ) -> dict[str, Any]:
-        """Extract ingredients from a dish image.
-
-        Args:
-            image_path: Path to the image file.
-
-        Returns:
-            Dictionary with dish_name, ingredients, cuisine, and confidence.
-
-        Raises:
-            FileNotFoundError: If image file doesn't exist.
-            ValueError: If Gemini response cannot be parsed.
-        """
-        image_path = Path(image_path)
-        if not image_path.exists():
-            raise FileNotFoundError(f"Image not found: {image_path}")
-
-        # Load and prepare image
-        image = Image.open(image_path)
-
-        # Generate content with image and prompt
-        response = self.model.generate_content([self.IMAGE_PROMPT, image])
-
-        # Parse and return the response
-        result = self._parse_json_response(response.text)
-
-        # Ensure required fields exist
-        return {
-            "dish_name": result.get("dish_name", "Unknown Dish"),
-            "ingredients": result.get("ingredients", []),
-            "cuisine": result.get("cuisine"),
-            "confidence": result.get("confidence", "medium"),
-            "source": "image",
-            "image_path": str(image_path),
-        }
+            logger.error("Failed to parse Gemini response as JSON: %s", e)
+            logger.error("Full raw response:\n%s", text)
+            raise ValueError(f"Failed to parse Gemini response as JSON: {e}\nResponse text: {text[:200]}")
 
     def extract_from_description(
         self,
@@ -151,86 +116,51 @@ Respond with ONLY the JSON object, no additional text."""
     ) -> dict[str, Any]:
         """Extract ingredients from a text description.
 
+        This is the primary method for ingredient extraction.
+        Gemini analyzes the text description to identify ingredients.
+
         Args:
             description: Text description of the dish.
 
         Returns:
-            Dictionary with dish_name, ingredients, cuisine, and confidence.
+            Dictionary with:
+                - dish_name: Extracted or inferred dish name
+                - ingredients: List of ingredient names
+                - cuisine: Type of cuisine if identifiable
+                - confidence: Extraction confidence level
+                - source: Always "description"
 
         Raises:
-            ValueError: If Gemini response cannot be parsed.
+            ValueError: If description is empty or Gemini response cannot be parsed.
         """
         if not description or not description.strip():
             raise ValueError("Description cannot be empty")
 
         prompt = self.TEXT_PROMPT.format(description=description)
+        logger.info("Sending prompt to Gemini for description: %s...", description[:100])
         response = self.model.generate_content(prompt)
+        
+        # Log raw response for debugging
+        logger.info("Gemini raw response text:\n%s", response.text)
 
         # Parse and return the response
         result = self._parse_json_response(response.text)
 
-        # Ensure required fields exist
+        # Validate result is a dictionary
+        if not isinstance(result, dict):
+            raise ValueError(f"Expected dictionary from Gemini, got {type(result).__name__}")
+
+        # Ensure required fields exist with safe access
+        dish_name = result.get("dish_name") if isinstance(result.get("dish_name"), str) else "Unknown Dish"
+        ingredients = result.get("ingredients") if isinstance(result.get("ingredients"), list) else []
+        cuisine = result.get("cuisine") if isinstance(result.get("cuisine"), str) else None
+        confidence = result.get("confidence") if isinstance(result.get("confidence"), str) else "medium"
+
         return {
-            "dish_name": result.get("dish_name", "Unknown Dish"),
-            "ingredients": result.get("ingredients", []),
-            "cuisine": result.get("cuisine"),
-            "confidence": result.get("confidence", "medium"),
+            "dish_name": dish_name or "Unknown Dish",
+            "ingredients": ingredients,
+            "cuisine": cuisine,
+            "confidence": confidence,
             "source": "description",
-            "description": description,
         }
 
-    def extract_from_image_and_description(
-        self,
-        image_path: str | Path,
-        description: str,
-    ) -> dict[str, Any]:
-        """Extract ingredients from both image and description.
-
-        Combines results from both sources for better accuracy.
-
-        Args:
-            image_path: Path to the image file.
-            description: Text description of the dish.
-
-        Returns:
-            Dictionary with combined dish_name, ingredients, cuisine, and confidence.
-        """
-        image_path = Path(image_path)
-
-        # Load image
-        image = Image.open(image_path)
-
-        # Combined prompt
-        combined_prompt = f"""Analyze this food dish image along with its description and extract all ingredients.
-
-Description: {description}
-
-Return a JSON object with the following structure:
-{{
-    "dish_name": "Name of the dish",
-    "ingredients": ["ingredient1", "ingredient2", ...],
-    "cuisine": "Type of cuisine if identifiable, otherwise null",
-    "confidence": "high" | "medium" | "low"
-}}
-
-Guidelines:
-- Combine information from both the image and description
-- List all ingredients visible in the image or mentioned in the description
-- Use lowercase for ingredient names
-- Be specific with ingredient names
-- Resolve any conflicts by preferring the more specific information
-
-Respond with ONLY the JSON object, no additional text."""
-
-        response = self.model.generate_content([combined_prompt, image])
-        result = self._parse_json_response(response.text)
-
-        return {
-            "dish_name": result.get("dish_name", "Unknown Dish"),
-            "ingredients": result.get("ingredients", []),
-            "cuisine": result.get("cuisine"),
-            "confidence": result.get("confidence", "medium"),
-            "source": "image_and_description",
-            "image_path": str(image_path),
-            "description": description,
-        }

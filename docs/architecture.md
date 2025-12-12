@@ -24,16 +24,27 @@
 │  • Partial failure handling (continue on errors)                │
 └─────────────────────────────────────────────────────────────────┘
                               │
-              ┌───────────────┴───────────────┐
-              ▼                               ▼
-┌─────────────────────────┐     ┌─────────────────────────┐
-│      Gemini API         │     │        Neo4j            │
-├─────────────────────────┤     ├─────────────────────────┤
-│  gemini-1.5-flash       │     │  Graph database         │
-│  Multimodal analysis    │     │  MERGE to avoid dupes   │
-│  JSON structured output │     │  Unique constraints     │
-└─────────────────────────┘     └─────────────────────────┘
+              ┌───────────────┼───────────────┐
+              ▼               ▼               ▼
+┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+│   Gemini API    │  │   CLIP Model    │  │     Neo4j       │
+├─────────────────┤  ├─────────────────┤  ├─────────────────┤
+│ gemini-1.5-flash│  │ ViT-B/32        │  │ Graph database  │
+│ TEXT-ONLY       │  │ Image embedding │  │ MERGE to avoid  │
+│ Ingredient      │  │ 512-dim vectors │  │ duplicates      │
+│ extraction from │  │ Visual features │  │                 │
+│ descriptions    │  │                 │  │                 │
+└─────────────────┘  └─────────────────┘  └─────────────────┘
 ```
+
+## AI Responsibilities
+
+| Model | Purpose | Input | Output |
+|-------|---------|-------|--------|
+| **Gemini 1.5 Flash** | Ingredient extraction | Text description | Dish name, ingredients list, cuisine |
+| **CLIP ViT-B/32** | Visual embedding | Dish image | 512-dim vector for similarity search |
+
+> **Design Principle**: Gemini handles **text/description analysis only**. CLIP handles **image embeddings only**. This separation ensures clear responsibilities and optimal use of each model's strengths.
 
 ## Directory Structure
 
@@ -52,7 +63,8 @@ food-recsys/
     │   └── routes.py          # FastAPI endpoints
     ├── services/
     │   ├── __init__.py
-    │   ├── gemini_extractor.py    # Gemini AI integration
+    │   ├── gemini_extractor.py    # Gemini AI ingredient extraction
+    │   ├── clip_embedder.py       # CLIP image embedding
     │   └── neo4j_service.py       # Neo4j database operations
     └── pipeline/
         ├── __init__.py
@@ -61,12 +73,13 @@ food-recsys/
 
 ## Data Flow
 
-1. **Image Upload**: Client uploads dish images via multipart/form-data
+1. **Image Upload**: Client uploads dish images with names/descriptions via multipart/form-data
 2. **Temporary Storage**: Images saved to `/tmp/food-recsys/uploads/`
 3. **Background Processing**: ThreadPoolExecutor processes images in parallel
-4. **Gemini Extraction**: Each image analyzed by Gemini 1.5 Flash for ingredients
-5. **Neo4j Storage**: Dish and Ingredient nodes created with CONTAINS relationships
-6. **Cleanup**: Temp files deleted on success, retained on failure for retry
+4. **Gemini Extraction**: Text description analyzed by Gemini 1.5 Flash for ingredients
+5. **CLIP Embedding**: Each image embedded using CLIP ViT-B/32 (512-dim vector)
+6. **Neo4j Storage**: Dish (with embedding), Ingredient nodes, and relationships created
+7. **Cleanup**: Temp files deleted on success, retained on failure for retry
 
 ## Key Design Decisions
 
@@ -77,3 +90,7 @@ food-recsys/
 | **MERGE queries** | Idempotent operations, no duplicate ingredients |
 | **Job-based processing** | Non-blocking uploads, progress tracking |
 | **Temp file cleanup** | Delete on success, keep on failure for debugging |
+| **CLIP ViT-B/32** | Good balance of speed vs quality, 512-dim embeddings |
+| **Lazy model loading** | CLIP model loaded on first use to reduce startup time |
+| **Gemini text-only** | Uses Gemini for description parsing, CLIP for images |
+| **Separated AI concerns** | Clear responsibility: Gemini=text, CLIP=images |

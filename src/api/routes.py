@@ -2,8 +2,12 @@
 
 Provides endpoints for:
 - Batch image upload
-- Processing uploaded images with Gemini
+- Processing uploaded images (Gemini for description, CLIP for images)
 - Checking job status
+
+Design:
+- Gemini API: Extracts ingredients from text descriptions only
+- CLIP: Generates image embeddings for visual similarity search
 """
 
 import os
@@ -12,7 +16,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.config import config
 from src.pipeline.batch_processor import get_processor
@@ -27,7 +31,11 @@ class ProcessItem(BaseModel):
 
     id: str
     temp_path: str
-    description: str | None = None
+    name: str | None = Field(default=None, description="Dish name")
+    description: str | None = Field(
+        default=None, 
+        description="Text description - required for ingredient extraction via Gemini"
+    )
 
 
 class ProcessRequest(BaseModel):
@@ -42,7 +50,11 @@ class UploadResult(BaseModel):
     id: str
     original_name: str
     temp_path: str
-    description: str | None = None
+    name: str | None = Field(default=None, description="Dish name")
+    description: str | None = Field(
+        default=None, 
+        description="Text description - required for ingredient extraction"
+    )
 
 
 class UploadError(BaseModel):
@@ -169,15 +181,19 @@ async def health_check() -> HealthResponse:
 )
 async def upload_dish_images(
     images: Annotated[list[UploadFile], File(description="Dish images to upload")],
+    names: Annotated[
+        list[str] | None, Form(description="Names for each dish (matching image order)")
+    ] = None,
     descriptions: Annotated[
-        list[str] | None, Form(description="Descriptions for each image")
+        list[str] | None, Form(description="Descriptions for each image (required for ingredient extraction)")
     ] = None,
 ) -> UploadResponse:
     """Upload dish images for ingredient extraction.
 
     Args:
         images: One or more image files.
-        descriptions: Optional descriptions matching image order.
+        names: Optional dish names matching image order.
+        descriptions: Descriptions matching image order (required for Gemini extraction).
 
     Returns:
         Upload results with item IDs for processing.
@@ -188,6 +204,7 @@ async def upload_dish_images(
             detail={"error": "No images provided", "code": "NO_IMAGES"},
         )
 
+    names = names or []
     descriptions = descriptions or []
     uploaded: list[UploadResult] = []
     errors: list[UploadError] = []
@@ -200,6 +217,10 @@ async def upload_dish_images(
             try:
                 item = await save_uploaded_file(file)
 
+                # Add name if provided
+                if idx < len(names):
+                    item["name"] = names[idx]
+                    
                 # Add description if provided
                 if idx < len(descriptions):
                     item["description"] = descriptions[idx]
@@ -288,17 +309,26 @@ async def process_dishes(request: ProcessRequest) -> ProcessResponse:
 )
 async def upload_and_process(
     images: Annotated[list[UploadFile], File(description="Dish images to upload")],
+    names: Annotated[
+        list[str] | None, Form(description="Names for each dish (matching image order)")
+    ] = None,
     descriptions: Annotated[
-        list[str] | None, Form(description="Descriptions for each image")
+        list[str] | None, Form(description="Descriptions for each image (required for ingredient extraction)")
     ] = None,
 ) -> ProcessResponse:
     """Upload and immediately process dish images.
 
     Convenience endpoint that combines upload and process steps.
+    
+    Processing Flow:
+    1. Gemini API: Extracts ingredients from text descriptions
+    2. CLIP: Generates image embeddings for visual similarity
+    3. Neo4j: Stores dish with ingredients and embedding
 
     Args:
         images: One or more image files.
-        descriptions: Optional descriptions matching image order.
+        names: Optional dish names matching image order.
+        descriptions: Descriptions matching image order (required for Gemini extraction).
 
     Returns:
         Job ID for tracking progress.
@@ -309,6 +339,7 @@ async def upload_and_process(
             detail={"error": "No images provided", "code": "NO_IMAGES"},
         )
 
+    names = names or []
     descriptions = descriptions or []
     items: list[dict] = []
     errors: list[UploadError] = []
@@ -321,6 +352,10 @@ async def upload_and_process(
             try:
                 item = await save_uploaded_file(file)
 
+                # Add name if provided
+                if idx < len(names):
+                    item["name"] = names[idx]
+                    
                 if idx < len(descriptions):
                     item["description"] = descriptions[idx]
 

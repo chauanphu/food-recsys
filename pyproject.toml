@@ -12,6 +12,8 @@ dependencies = [
     "python-multipart>=0.0.12",
     "python-dotenv>=1.0.0",
     "Pillow>=10.0.0",
+    "transformers>=4.46.0",
+    "torch>=2.5.0",
 ]
 
 [project.scripts]

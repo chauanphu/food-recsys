@@ -14,6 +14,7 @@ Represents a food dish.
 | `name` | String | Name of the dish |
 | `description` | String | Optional description |
 | `image_url` | String | Path to the dish image |
+| `image_embedding` | List[Float] | CLIP embedding vector (512 dimensions) |
 | `created_at` | DateTime | When the dish was created |
 | `updated_at` | DateTime | When the dish was last updated |
 
