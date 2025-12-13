@@ -34,12 +34,12 @@ class GeminiExtractor:
 Description: {description}
 
 Return a JSON object with the following structure:
-{
+{{
     "dish_name": "Name of the dish if mentioned, otherwise 'Unknown Dish'",
     "ingredients": ["ingredient1", "ingredient2", ...],
     "cuisine": "Type of cuisine if identifiable, otherwise null",
     "confidence": "high" | "medium" | "low"
-}
+}}
 
 Guidelines:
 - Extract all explicitly mentioned ingredients
@@ -69,7 +69,7 @@ Respond with ONLY the JSON object, no additional text."""
     def model(self) -> genai.GenerativeModel:
         """Get or create the Gemini model instance."""
         if self._model is None:
-            self._model = genai.GenerativeModel("gemini-1.5-flash")
+            self._model = genai.GenerativeModel("gemini-2.5-flash-lite")
         return self._model
 
     def _parse_json_response(self, text: str) -> dict[str, Any]:
@@ -84,9 +84,6 @@ Respond with ONLY the JSON object, no additional text."""
         Raises:
             ValueError: If JSON parsing fails.
         """
-        # Log the raw response for debugging
-        logger.debug("Raw Gemini response:\n%s", text)
-        
         # Remove markdown code blocks if present
         text = text.strip()
         if text.startswith("```"):

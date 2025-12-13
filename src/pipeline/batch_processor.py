@@ -4,6 +4,7 @@ Handles parallel processing of multiple dish images using ThreadPoolExecutor,
 with progress tracking and automatic temp file cleanup on success.
 """
 
+import logging
 import os
 import threading
 import uuid
@@ -191,6 +192,7 @@ class BatchProcessor:
             # Step 1: Extract ingredients using Gemini (from description only)
             extraction = None
             if description:
+                logging.info("Extracting ingredients for item %s using Gemini...", item_id)
                 extraction = self.gemini.extract_from_description(description)
             
             # Use provided dish_name or extracted one, or default

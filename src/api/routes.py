@@ -10,6 +10,7 @@ Design:
 - CLIP: Generates image embeddings for visual similarity search
 """
 
+import logging
 import os
 import uuid
 from pathlib import Path
@@ -382,6 +383,7 @@ async def upload_and_process(
 
     # Start batch processing
     processor = get_processor()
+    logging.info("Starting batch processing for %d items...", len(items))
     job_id = processor.start_batch(items)
 
     return ProcessResponse(
