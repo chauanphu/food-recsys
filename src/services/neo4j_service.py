@@ -822,3 +822,90 @@ class Neo4jService:
                 data["not_suited_ingredients"] = [i for i in data["not_suited_ingredients"] if i]
                 return data
             return None
+
+    # =========================================================================
+    # Dish Similarity Visualization Methods
+    # =========================================================================
+
+    def get_dishes_summary(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Get a summary of all dishes for selection.
+
+        Args:
+            limit: Maximum number of dishes to return.
+
+        Returns:
+            List of dictionaries with dish_id and name.
+        """
+        query = """
+        MATCH (d:Dish)
+        WHERE d.image_embedding IS NOT NULL
+        RETURN d.dish_id AS dish_id, d.name AS name
+        ORDER BY d.name
+        LIMIT $limit
+        """
+
+        with self.session() as session:
+            result = session.run(query, limit=limit)
+            return [dict(record) for record in result]
+
+    def get_dishes_with_embeddings_and_ingredients(
+        self,
+        dish_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        """Get dishes with their image embeddings, ingredients, and ingredient embeddings.
+
+        Filters out dishes where image_embedding is null.
+
+        Args:
+            dish_ids: List of dish IDs to retrieve.
+
+        Returns:
+            List of dictionaries with dish data, embeddings, and ingredients.
+        """
+        query = """
+        MATCH (d:Dish)
+        WHERE d.dish_id IN $dish_ids AND d.image_embedding IS NOT NULL
+        OPTIONAL MATCH (d)-[:CONTAINS]->(i:Ingredient)
+        WITH d, 
+             collect(DISTINCT i.name) AS ingredient_names,
+             collect(DISTINCT i.embedding) AS ingredient_embeddings
+        RETURN d.dish_id AS dish_id,
+               d.name AS name,
+               d.image_embedding AS image_embedding,
+               ingredient_names AS ingredients,
+               [emb IN ingredient_embeddings WHERE emb IS NOT NULL] AS ingredient_embeddings
+        ORDER BY d.name
+        """
+
+        with self.session() as session:
+            result = session.run(query, dish_ids=dish_ids)
+            return [dict(record) for record in result]
+
+    def get_all_dishes_with_embeddings(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Get all dishes with their embeddings and ingredients.
+
+        Args:
+            limit: Maximum number of dishes to return.
+
+        Returns:
+            List of dictionaries with dish data, embeddings, and ingredients.
+        """
+        query = """
+        MATCH (d:Dish)
+        WHERE d.image_embedding IS NOT NULL
+        OPTIONAL MATCH (d)-[:CONTAINS]->(i:Ingredient)
+        WITH d, 
+             collect(DISTINCT i.name) AS ingredient_names,
+             collect(DISTINCT i.embedding) AS ingredient_embeddings
+        RETURN d.dish_id AS dish_id,
+               d.name AS name,
+               d.image_embedding AS image_embedding,
+               ingredient_names AS ingredients,
+               [emb IN ingredient_embeddings WHERE emb IS NOT NULL] AS ingredient_embeddings
+        ORDER BY d.name
+        LIMIT $limit
+        """
+
+        with self.session() as session:
+            result = session.run(query, limit=limit)
+            return [dict(record) for record in result]
