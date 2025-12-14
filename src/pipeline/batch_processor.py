@@ -218,7 +218,8 @@ class BatchProcessor:
     def extractor(self) -> GemmaExtractor:
         """Get or create  Extractor instance."""
         if self._gemini is None:
-            self._gemini = GemmaExtractor()
+            # Reuse singleton so the model can be preloaded at setup.
+            self._gemini = get_gemma_extractor()
         return self._gemini
 
     @property
@@ -753,5 +754,7 @@ def get_processor() -> BatchProcessor:
     global _processor
     with _processor_lock:
         if _processor is None:
-            _processor = BatchProcessor()
+            # Preload Gemma during setup so the first extraction call doesn't fail.
+            extractor = get_gemma_extractor(preload=True)
+            _processor = BatchProcessor(extractor=extractor)
         return _processor

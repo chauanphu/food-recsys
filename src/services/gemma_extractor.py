@@ -15,7 +15,7 @@ import re
 from typing import Any
 
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 
 # Configure logger for this module
 logger = logging.getLogger(__name__)
@@ -57,6 +57,7 @@ Respond with ONLY the JSON object, no additional text."""
         model_id: str | None = None,
         device: str | None = None,
         torch_dtype: torch.dtype | None = None,
+        preload: bool = False,
     ):
         """Initialize the Gemma extractor.
 
@@ -70,9 +71,11 @@ Respond with ONLY the JSON object, no additional text."""
         self._model_id = model_id or self.MODEL_ID
         self._device = device or self._get_default_device()
         self._torch_dtype = torch_dtype or self._get_default_dtype()
-        self._model: AutoModelForCausalLM | None = None
-        self._tokenizer: AutoTokenizer | None = None
-        self._pipeline = None
+        # NOTE: Transformers typing stubs vary across versions; keep these as Any
+        # to avoid false-positive type errors while still ensuring runtime safety.
+        self._model: Any | None = None
+        self._tokenizer: Any | None = None
+        self._pipeline: Any = None
         
         logger.info(
             "Initializing GemmaExtractor with model=%s, device=%s, dtype=%s",
@@ -80,6 +83,10 @@ Respond with ONLY the JSON object, no additional text."""
             self._device,
             self._torch_dtype,
         )
+
+        if preload:
+            # Preload at setup time so later pipeline calls don't race on lazy init.
+            self._load_model()
 
     def _get_default_device(self) -> str:
         """Determine the best available device."""
@@ -103,35 +110,46 @@ Respond with ONLY the JSON object, no additional text."""
         logger.info("Loading Gemma model: %s", self._model_id)
         
         self._tokenizer = AutoTokenizer.from_pretrained(self._model_id)
+
+        # `device_map` expects values like "auto"; passing "cuda" will error.
+        device_map: str | None
+        if self._device == "cuda":
+            device_map = "auto"
+        else:
+            device_map = None
+
         self._model = AutoModelForCausalLM.from_pretrained(
             self._model_id,
             torch_dtype=self._torch_dtype,
-            device_map=self._device if self._device != "cpu" else None,
+            device_map=device_map,
         )
-        
-        if self._device == "cpu":
-            self._model = self._model.to("cpu")
-        
+
+        # For non-cuda, explicitly move to the chosen device.
+        if self._device in ("cpu", "mps"):
+            self._model = self._model.to(self._device)
+
         # Create text generation pipeline
         self._pipeline = pipeline(
             "text-generation",
             model=self._model,
             tokenizer=self._tokenizer,
-            device_map=self._device if self._device != "cpu" else None,
+            device_map=device_map,
         )
         
         logger.info("Gemma model loaded successfully on device: %s", self._device)
 
     @property
-    def model(self) -> AutoModelForCausalLM:
+    def model(self) -> Any:
         """Get or create the Gemma model instance."""
         self._load_model()
+        assert self._model is not None
         return self._model
 
     @property
-    def tokenizer(self) -> AutoTokenizer:
+    def tokenizer(self) -> Any:
         """Get or create the tokenizer instance."""
         self._load_model()
+        assert self._tokenizer is not None
         return self._tokenizer
 
     def _parse_json_response(self, text: str) -> dict[str, Any]:
@@ -202,6 +220,9 @@ Respond with ONLY the JSON object, no additional text."""
         # Ensure model is loaded
         self._load_model()
 
+        assert self._pipeline is not None
+        assert self._tokenizer is not None
+
         prompt = self.TEXT_PROMPT.format(description=description)
         logger.info("Sending prompt to Gemma for description: %s...", description[:100])
 
@@ -218,7 +239,7 @@ Respond with ONLY the JSON object, no additional text."""
             do_sample=True,
             temperature=0.7,
             top_p=0.9,
-            pad_token_id=self._tokenizer.eos_token_id,
+            pad_token_id=getattr(self._tokenizer, "eos_token_id", None),
         )
 
         # Extract generated text
@@ -282,6 +303,7 @@ _gemma_extractor: GemmaExtractor | None = None
 def get_gemma_extractor(
     model_id: str | None = None,
     device: str | None = None,
+    preload: bool = False,
 ) -> GemmaExtractor:
     """Get or create a singleton GemmaExtractor instance.
 
@@ -297,5 +319,7 @@ def get_gemma_extractor(
     """
     global _gemma_extractor
     if _gemma_extractor is None:
-        _gemma_extractor = GemmaExtractor(model_id=model_id, device=device)
+        _gemma_extractor = GemmaExtractor(model_id=model_id, device=device, preload=preload)
+    elif preload:
+        _gemma_extractor._load_model()
     return _gemma_extractor

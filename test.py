@@ -2,12 +2,12 @@ from src.services.ingredient_embedder import IngredientEmbedder
 
 embedder = IngredientEmbedder(device='cuda')
 
-query = "brown sugar"
+query = "peanut"
 candidates = [
     # 1. Exact Match (The Baseline)
-    ("sugar", "food ingredient"),
-    ("orange", "food ingredient"),
-    # 2. Strong Semantic Neighbor (Should be close, but lower)
+    ("peanuts", "food ingredient"),
+    ("peanut butter", "food ingredient"),
+    #2. Strong Semantic Neighbor (Should be close, but lower)
     ("cashew", "food ingredient"),
     # 3. Weak Neighbor (Same category, different specific)
     ("sunflower seeds", "food ingredient"),

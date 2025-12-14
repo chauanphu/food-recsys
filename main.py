@@ -47,6 +47,12 @@ def create_app() -> FastAPI:
     # Include API router
     app.include_router(router)
 
+    @app.on_event("startup")
+    async def _warmup_models() -> None:
+        # Force processor creation (and Gemma preload) during app startup
+        # to avoid first-request latency and lazy-init edge cases.
+        _ = get_processor()
+
     # Add root route
     @app.get("/")
     async def index():
@@ -182,7 +188,7 @@ def seed_dietary_restrictions() -> None:
         sys.exit(1)
 
 
-def run_server() -> None:
+def run_server(isReload=False) -> None:
     """Run the FastAPI server with uvicorn."""
     # Validate config
     missing = config.validate()
@@ -198,7 +204,7 @@ def run_server() -> None:
         factory=True,
         host=config.APP_HOST,
         port=config.APP_PORT,
-        reload=config.APP_DEBUG,
+        reload=isReload,
     )
 
 
@@ -266,9 +272,10 @@ Examples:
         if args.port:
             config.APP_PORT = args.port
         if args.reload:
-            config.APP_DEBUG = True
-
-        run_server()
+            isReload = True
+        else:
+            isReload = False
+        run_server(isReload=isReload)
 
 
 if __name__ == "__main__":
