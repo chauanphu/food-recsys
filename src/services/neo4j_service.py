@@ -909,3 +909,265 @@ class Neo4jService:
         with self.session() as session:
             result = session.run(query, limit=limit)
             return [dict(record) for record in result]
+
+    # =========================================================================
+    # User Methods
+    # =========================================================================
+
+    def merge_user_by_name(
+        self,
+        name: str,
+        age: int | None = None,
+        gender: int | None = None,
+        nationality: str | None = None,
+    ) -> dict[str, Any]:
+        """Merge a user by name, generating UUID only on create.
+
+        Uses normalized name for matching to ensure idempotency.
+
+        Args:
+            name: User's full name (used as unique identifier).
+            age: User's age.
+            gender: User's gender (0 = female, 1 = male).
+            nationality: User's nationality/country.
+
+        Returns:
+            Dictionary with user data including user_id.
+        """
+        import uuid as uuid_module
+
+        query = """
+        MERGE (u:User {normalized_name: toLower(trim($name))})
+        ON CREATE SET
+            u.user_id = $user_id,
+            u.name = $name,
+            u.age = $age,
+            u.gender = $gender,
+            u.nationality = $nationality,
+            u.created_at = datetime()
+        ON MATCH SET
+            u.name = COALESCE($name, u.name),
+            u.age = COALESCE($age, u.age),
+            u.gender = COALESCE($gender, u.gender),
+            u.nationality = COALESCE($nationality, u.nationality),
+            u.updated_at = datetime()
+        RETURN u.user_id AS user_id,
+               u.name AS name,
+               u.age AS age,
+               u.gender AS gender,
+               u.nationality AS nationality,
+               u.created_at IS NOT NULL AND u.updated_at IS NULL AS is_new
+        """
+
+        params = {
+            "name": name,
+            "user_id": str(uuid_module.uuid4()),
+            "age": age,
+            "gender": gender,
+            "nationality": nationality,
+        }
+
+        with self.session() as session:
+            result = session.run(query, **params).single()
+            if result:
+                return dict(result)
+            return {"user_id": params["user_id"], "name": name, "is_new": True}
+
+    def get_user_by_id(self, user_id: str) -> dict[str, Any] | None:
+        """Retrieve a user by ID with their dietary restrictions and ratings.
+
+        Args:
+            user_id: The user identifier.
+
+        Returns:
+            Dictionary with user data, restrictions, and ratings, or None if not found.
+        """
+        query = """
+        MATCH (u:User {user_id: $user_id})
+        OPTIONAL MATCH (u)-[:HAS_RESTRICTION]->(r:DietaryRestriction)
+        OPTIONAL MATCH (u)-[rated:RATED]->(d:Dish)
+        RETURN u.user_id AS user_id,
+               u.name AS name,
+               u.age AS age,
+               u.gender AS gender,
+               u.nationality AS nationality,
+               collect(DISTINCT r.name) AS dietary_restrictions,
+               collect(DISTINCT {dish_name: d.name, dish_id: d.dish_id, score: rated.score}) AS ratings
+        """
+
+        with self.session() as session:
+            result = session.run(query, user_id=user_id).single()
+            if result:
+                data = dict(result)
+                # Filter out None values from collections
+                data["dietary_restrictions"] = [r for r in data["dietary_restrictions"] if r]
+                data["ratings"] = [r for r in data["ratings"] if r.get("dish_name")]
+                return data
+            return None
+
+    def get_user_by_name(self, name: str) -> dict[str, Any] | None:
+        """Retrieve a user by name.
+
+        Args:
+            name: The user's name.
+
+        Returns:
+            Dictionary with user data, or None if not found.
+        """
+        query = """
+        MATCH (u:User {normalized_name: toLower(trim($name))})
+        OPTIONAL MATCH (u)-[:HAS_RESTRICTION]->(r:DietaryRestriction)
+        OPTIONAL MATCH (u)-[rated:RATED]->(d:Dish)
+        RETURN u.user_id AS user_id,
+               u.name AS name,
+               u.age AS age,
+               u.gender AS gender,
+               u.nationality AS nationality,
+               collect(DISTINCT r.name) AS dietary_restrictions,
+               collect(DISTINCT {dish_name: d.name, dish_id: d.dish_id, score: rated.score}) AS ratings
+        """
+
+        with self.session() as session:
+            result = session.run(query, name=name).single()
+            if result:
+                data = dict(result)
+                data["dietary_restrictions"] = [r for r in data["dietary_restrictions"] if r]
+                data["ratings"] = [r for r in data["ratings"] if r.get("dish_name")]
+                return data
+            return None
+
+    def get_all_users(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Retrieve all users with their dietary restrictions.
+
+        Args:
+            limit: Maximum number of users to return.
+
+        Returns:
+            List of user dictionaries.
+        """
+        query = """
+        MATCH (u:User)
+        OPTIONAL MATCH (u)-[:HAS_RESTRICTION]->(r:DietaryRestriction)
+        OPTIONAL MATCH (u)-[rated:RATED]->(d:Dish)
+        WITH u, 
+             collect(DISTINCT r.name) AS restrictions,
+             count(DISTINCT d) AS rating_count
+        RETURN u.user_id AS user_id,
+               u.name AS name,
+               u.age AS age,
+               u.gender AS gender,
+               u.nationality AS nationality,
+               restrictions AS dietary_restrictions,
+               rating_count
+        ORDER BY u.name
+        LIMIT $limit
+        """
+
+        with self.session() as session:
+            result = session.run(query, limit=limit)
+            users = []
+            for record in result:
+                data = dict(record)
+                data["dietary_restrictions"] = [r for r in data["dietary_restrictions"] if r]
+                users.append(data)
+            return users
+
+    def create_user_restriction_relationship(
+        self,
+        user_id: str,
+        restriction_name: str,
+    ) -> dict[str, Any] | None:
+        """Create HAS_RESTRICTION relationship between user and dietary restriction.
+
+        Args:
+            user_id: The user identifier.
+            restriction_name: Name of the dietary restriction.
+
+        Returns:
+            Dictionary with relationship info, or None if nodes not found.
+        """
+        query = """
+        MATCH (u:User {user_id: $user_id})
+        MATCH (r:DietaryRestriction {name: toLower(trim($restriction_name))})
+        MERGE (u)-[rel:HAS_RESTRICTION]->(r)
+        ON CREATE SET rel.created_at = datetime()
+        RETURN u.user_id AS user_id, r.name AS restriction, type(rel) AS relationship
+        """
+
+        with self.session() as session:
+            result = session.run(
+                query,
+                user_id=user_id,
+                restriction_name=restriction_name,
+            ).single()
+            return dict(result) if result else None
+
+    def create_user_rating(
+        self,
+        user_id: str,
+        dish_name: str,
+        score: int,
+    ) -> dict[str, Any] | None:
+        """Create RATED relationship between user and dish.
+
+        Args:
+            user_id: The user identifier.
+            dish_name: Name of the dish (exact match).
+            score: Rating score (1-5).
+
+        Returns:
+            Dictionary with relationship info, or None if nodes not found.
+        """
+        query = """
+        MATCH (u:User {user_id: $user_id})
+        MATCH (d:Dish {name: $dish_name})
+        MERGE (u)-[rated:RATED]->(d)
+        ON CREATE SET rated.score = $score, rated.created_at = datetime()
+        ON MATCH SET rated.score = $score, rated.updated_at = datetime()
+        RETURN u.user_id AS user_id, d.name AS dish_name, d.dish_id AS dish_id, rated.score AS score
+        """
+
+        with self.session() as session:
+            result = session.run(
+                query,
+                user_id=user_id,
+                dish_name=dish_name,
+                score=score,
+            ).single()
+            return dict(result) if result else None
+
+    def get_dish_by_name(self, name: str) -> dict[str, Any] | None:
+        """Get a dish by exact name match.
+
+        Args:
+            name: Dish name (exact match).
+
+        Returns:
+            Dictionary with dish data, or None if not found.
+        """
+        query = """
+        MATCH (d:Dish {name: $name})
+        RETURN d.dish_id AS dish_id, d.name AS name
+        """
+
+        with self.session() as session:
+            result = session.run(query, name=name).single()
+            return dict(result) if result else None
+
+    def get_restriction_by_name(self, name: str) -> dict[str, Any] | None:
+        """Get a dietary restriction by exact name match.
+
+        Args:
+            name: Restriction name (will be normalized).
+
+        Returns:
+            Dictionary with restriction data, or None if not found.
+        """
+        query = """
+        MATCH (r:DietaryRestriction {name: toLower(trim($name))})
+        RETURN r.name AS name, r.description AS description
+        """
+
+        with self.session() as session:
+            result = session.run(query, name=name).single()
+            return dict(result) if result else None

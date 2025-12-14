@@ -35,16 +35,16 @@ A Food Recommendation System that suggests the best dishes based on user prefere
   - Attributes: restriction_id, name
 
 ### Relationships
-- User -[BOOKED]-> Dish: Represents a user booking a dish.
 - User -[RATED]-> Dish: Represents a user rating a dish.
-  - Attributes: rating (1-5), review (default to 4 if a user has booked a dish but not rated it)
+  - Attributes: rating (1-5)
+- User -[FOLLOWS]-> Dietary Restriction: Represents a user's dietary restrictions.
+- Attributes: is_strict (boolean)
 - Dish -[CONTAINS]-> Ingredient: Represents the ingredients used in a dish.
 - Dish -[ORIGINATES_FROM]-> Country / Region: Represents the origin of the dish.
-- User -[PREFERS]-> Ingredient: Represents a user's preference for certain ingredients.
-- User -[AVOIDS]-> Ingredient: Represents a user's dietary restrictions.
+<!-- - User -[PREFERS]-> Ingredient: Represents a user's preference for certain ingredients.
+- User -[AVOIDS]-> Ingredient: Represents a user's dietary restrictions. -->
 - Ingredient -[SUITED_FOR]-> Dietary Restriction: Represents which ingredients are suitable for certain dietary restrictions.
 - Ingredient -[NOT_SUITED_FOR]-> Dietary Restriction: Represents which ingredients are not suitable for certain dietary restrictions.
-- User -[FOLLOWS]-> Dietary Restriction: Represents a user's dietary restrictions.
 
 ## Use Cases:
 

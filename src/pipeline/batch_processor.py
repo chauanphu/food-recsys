@@ -4,6 +4,7 @@ Handles parallel processing of multiple dish images using ThreadPoolExecutor,
 with progress tracking and automatic temp file cleanup on success.
 """
 
+import json
 import logging
 import os
 import threading
@@ -44,6 +45,82 @@ class ProcessingResult:
     image_embedding: list[float] | None = None
     error: str | None = None
     temp_path: str | None = None
+
+
+@dataclass
+class UserIngestResult:
+    """Result of ingesting a single user."""
+
+    name: str
+    success: bool
+    user_id: str | None = None
+    is_new: bool = False
+    restriction_linked: bool = False
+    restriction_skipped: str | None = None
+    ratings_linked: int = 0
+    ratings_skipped: list[str] = field(default_factory=list)
+    error: str | None = None
+
+
+@dataclass
+class UserIngestJob:
+    """Represents a user ingestion job with progress tracking."""
+
+    job_id: str
+    total_users: int
+    status: ProcessingStatus = ProcessingStatus.PENDING
+    created: int = 0
+    updated: int = 0
+    failed: int = 0
+    results: list[UserIngestResult] = field(default_factory=list)
+    created_at: datetime = field(default_factory=datetime.now)
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+    @property
+    def progress(self) -> float:
+        """Calculate progress percentage."""
+        if self.total_users == 0:
+            return 100.0
+        return len(self.results) / self.total_users * 100
+
+    @property
+    def is_finished(self) -> bool:
+        """Check if job has finished processing."""
+        return self.status in (
+            ProcessingStatus.COMPLETED,
+            ProcessingStatus.FAILED,
+            ProcessingStatus.PARTIAL,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert job to dictionary for API response."""
+        return {
+            "job_id": self.job_id,
+            "status": self.status.value,
+            "progress": round(self.progress, 2),
+            "total_users": self.total_users,
+            "created": self.created,
+            "updated": self.updated,
+            "failed": self.failed,
+            "created_at": self.created_at.isoformat(),
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "results": [
+                {
+                    "name": r.name,
+                    "success": r.success,
+                    "user_id": r.user_id,
+                    "is_new": r.is_new,
+                    "restriction_linked": r.restriction_linked,
+                    "restriction_skipped": r.restriction_skipped,
+                    "ratings_linked": r.ratings_linked,
+                    "ratings_skipped": r.ratings_skipped,
+                    "error": r.error,
+                }
+                for r in self.results
+            ],
+        }
 
 
 @dataclass
@@ -132,6 +209,10 @@ class BatchProcessor:
         # Job storage with thread-safe access
         self._jobs: dict[str, BatchJob] = {}
         self._jobs_lock = threading.Lock()
+
+        # User ingestion job storage
+        self._user_jobs: dict[str, UserIngestJob] = {}
+        self._user_jobs_lock = threading.Lock()
 
     @property
     def extractor(self) -> GemmaExtractor:
@@ -393,6 +474,264 @@ class BatchProcessor:
             self._cleanup_temp_file(temp_path)
 
         return result
+
+    # =========================================================================
+    # User Ingestion Methods
+    # =========================================================================
+
+    def get_user_job(self, job_id: str) -> UserIngestJob | None:
+        """Get a user ingestion job by ID.
+
+        Args:
+            job_id: The job identifier.
+
+        Returns:
+            UserIngestJob instance or None if not found.
+        """
+        with self._user_jobs_lock:
+            return self._user_jobs.get(job_id)
+
+    def _process_single_user(
+        self,
+        user_data: dict[str, Any],
+    ) -> UserIngestResult:
+        """Process a single user from JSON data.
+
+        Args:
+            user_data: Dictionary with user data from JSON.
+
+        Returns:
+            UserIngestResult with ingestion details.
+        """
+        name = user_data.get("name", "")
+        if not name:
+            return UserIngestResult(
+                name="<unknown>",
+                success=False,
+                error="User name is required",
+            )
+
+        try:
+            # Step 1: Merge user by name (idempotent)
+            user_result = self.neo4j.merge_user_by_name(
+                name=name,
+                age=user_data.get("age"),
+                gender=user_data.get("gender"),
+                nationality=user_data.get("nationality"),
+            )
+
+            user_id = user_result["user_id"]
+            is_new = user_result.get("is_new", False)
+
+            # Step 2: Handle dietary restriction (exact match, skip if not found)
+            restriction_linked = False
+            restriction_skipped = None
+            dietary_restriction = user_data.get("dietary_restriction")
+
+            if dietary_restriction:
+                # Check if restriction exists (exact match)
+                restriction = self.neo4j.get_restriction_by_name(dietary_restriction)
+                if restriction:
+                    rel_result = self.neo4j.create_user_restriction_relationship(
+                        user_id=user_id,
+                        restriction_name=dietary_restriction,
+                    )
+                    restriction_linked = rel_result is not None
+                else:
+                    restriction_skipped = dietary_restriction
+                    logging.warning(
+                        "Skipping dietary restriction '%s' for user '%s': not found in database",
+                        dietary_restriction,
+                        name,
+                    )
+
+            # Step 3: Handle ratings (exact match dish names, skip if not found)
+            ratings_linked = 0
+            ratings_skipped = []
+            ratings = user_data.get("ratings", {})
+
+            for dish_name, score in ratings.items():
+                # Check if dish exists (exact match)
+                dish = self.neo4j.get_dish_by_name(dish_name)
+                if dish:
+                    rating_result = self.neo4j.create_user_rating(
+                        user_id=user_id,
+                        dish_name=dish_name,
+                        score=score,
+                    )
+                    if rating_result:
+                        ratings_linked += 1
+                else:
+                    ratings_skipped.append(dish_name)
+                    logging.warning(
+                        "Skipping rating for dish '%s' (user '%s'): dish not found in database",
+                        dish_name,
+                        name,
+                    )
+
+            return UserIngestResult(
+                name=name,
+                success=True,
+                user_id=user_id,
+                is_new=is_new,
+                restriction_linked=restriction_linked,
+                restriction_skipped=restriction_skipped,
+                ratings_linked=ratings_linked,
+                ratings_skipped=ratings_skipped,
+            )
+
+        except Exception as e:
+            logging.exception("Error ingesting user '%s'", name)
+            return UserIngestResult(
+                name=name,
+                success=False,
+                error=str(e),
+            )
+
+    def _process_user_batch(
+        self,
+        job_id: str,
+        users: list[dict[str, Any]],
+    ) -> None:
+        """Process a batch of users in the background.
+
+        Args:
+            job_id: The job identifier.
+            users: List of user dictionaries from JSON.
+        """
+        job = self._user_jobs[job_id]
+
+        with self._user_jobs_lock:
+            job.status = ProcessingStatus.PROCESSING
+            job.started_at = datetime.now()
+
+        # Process users sequentially (to avoid concurrent Neo4j transaction issues)
+        for user_data in users:
+            result = self._process_single_user(user_data)
+
+            with self._user_jobs_lock:
+                job.results.append(result)
+
+                if result.success:
+                    if result.is_new:
+                        job.created += 1
+                    else:
+                        job.updated += 1
+                else:
+                    job.failed += 1
+
+        # Set final status
+        with self._user_jobs_lock:
+            job.finished_at = datetime.now()
+
+            if job.failed == 0:
+                job.status = ProcessingStatus.COMPLETED
+            elif job.created + job.updated == 0:
+                job.status = ProcessingStatus.FAILED
+            else:
+                job.status = ProcessingStatus.PARTIAL
+
+    def ingest_users_from_json(
+        self,
+        json_path: str | Path,
+    ) -> str:
+        """Start user ingestion from a JSON file.
+
+        Args:
+            json_path: Path to the JSON file containing user data.
+
+        Returns:
+            The job ID for tracking progress.
+
+        Raises:
+            FileNotFoundError: If the JSON file doesn't exist.
+            json.JSONDecodeError: If the file is not valid JSON.
+        """
+        json_path = Path(json_path)
+
+        if not json_path.exists():
+            raise FileNotFoundError(f"JSON file not found: {json_path}")
+
+        # Load and parse JSON
+        with open(json_path, "r", encoding="utf-8") as f:
+            users = json.load(f)
+
+        if not isinstance(users, list):
+            raise ValueError("JSON file must contain an array of users")
+
+        job_id = str(uuid.uuid4())
+        job = UserIngestJob(job_id=job_id, total_users=len(users))
+
+        with self._user_jobs_lock:
+            self._user_jobs[job_id] = job
+
+        # Start processing in background thread
+        thread = threading.Thread(
+            target=self._process_user_batch,
+            args=(job_id, users),
+            daemon=True,
+        )
+        thread.start()
+
+        return job_id
+
+    def ingest_users_sync(
+        self,
+        json_path: str | Path,
+    ) -> UserIngestJob:
+        """Synchronously ingest users from a JSON file.
+
+        Args:
+            json_path: Path to the JSON file containing user data.
+
+        Returns:
+            UserIngestJob with complete results.
+
+        Raises:
+            FileNotFoundError: If the JSON file doesn't exist.
+            json.JSONDecodeError: If the file is not valid JSON.
+        """
+        json_path = Path(json_path)
+
+        if not json_path.exists():
+            raise FileNotFoundError(f"JSON file not found: {json_path}")
+
+        # Load and parse JSON
+        with open(json_path, "r", encoding="utf-8") as f:
+            users = json.load(f)
+
+        if not isinstance(users, list):
+            raise ValueError("JSON file must contain an array of users")
+
+        job_id = str(uuid.uuid4())
+        job = UserIngestJob(job_id=job_id, total_users=len(users))
+        job.status = ProcessingStatus.PROCESSING
+        job.started_at = datetime.now()
+
+        # Process users synchronously
+        for user_data in users:
+            result = self._process_single_user(user_data)
+            job.results.append(result)
+
+            if result.success:
+                if result.is_new:
+                    job.created += 1
+                else:
+                    job.updated += 1
+            else:
+                job.failed += 1
+
+        # Set final status
+        job.finished_at = datetime.now()
+
+        if job.failed == 0:
+            job.status = ProcessingStatus.COMPLETED
+        elif job.created + job.updated == 0:
+            job.status = ProcessingStatus.FAILED
+        else:
+            job.status = ProcessingStatus.PARTIAL
+
+        return job
 
     def close(self) -> None:
         """Close service connections."""

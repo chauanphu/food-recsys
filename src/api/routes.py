@@ -141,6 +141,89 @@ class IngredientActionResponse(BaseModel):
     message: str
 
 
+# =========================================================================
+# User Models
+# =========================================================================
+
+
+class UserRating(BaseModel):
+    """A user's rating of a dish."""
+
+    dish_name: str
+    dish_id: str | None = None
+    score: int = Field(ge=1, le=5, description="Rating score from 1 to 5")
+
+
+class UserResponse(BaseModel):
+    """Response model for a single user."""
+
+    user_id: str
+    name: str
+    age: int | None = None
+    gender: int | None = None
+    nationality: str | None = None
+    dietary_restrictions: list[str] = Field(default_factory=list)
+    ratings: list[UserRating] = Field(default_factory=list)
+
+
+class UserSummaryResponse(BaseModel):
+    """Summary response model for a user in list view."""
+
+    user_id: str
+    name: str
+    age: int | None = None
+    gender: int | None = None
+    nationality: str | None = None
+    dietary_restrictions: list[str] = Field(default_factory=list)
+    rating_count: int = 0
+
+
+class UsersListResponse(BaseModel):
+    """Response from list users endpoint."""
+
+    users: list[UserSummaryResponse]
+    count: int
+
+
+class UserIngestResultResponse(BaseModel):
+    """Result of ingesting a single user."""
+
+    name: str
+    success: bool
+    user_id: str | None = None
+    is_new: bool = False
+    restriction_linked: bool = False
+    restriction_skipped: str | None = None
+    ratings_linked: int = 0
+    ratings_skipped: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
+class UserIngestJobResponse(BaseModel):
+    """Response from user ingestion endpoint."""
+
+    job_id: str
+    status: str
+    progress: float
+    total_users: int
+    created: int
+    updated: int
+    failed: int
+    created_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    results: list[UserIngestResultResponse] = Field(default_factory=list)
+
+
+class UserIngestRequest(BaseModel):
+    """Request body for user ingestion endpoint."""
+
+    json_path: str = Field(
+        default="users.json",
+        description="Path to JSON file containing user data",
+    )
+
+
 def allowed_file(filename: str) -> bool:
     """Check if file extension is allowed.
 
@@ -466,4 +549,165 @@ async def reject_ingredient(
         name=name,
         action="rejected",
         message=f"Ingredient '{name}' merged into '{result['merged_into']}' ({result['merged_count']} dishes updated)",
+    )
+
+
+# =========================================================================
+# User Endpoints
+# =========================================================================
+
+
+@router.post(
+    "/users/ingest",
+    response_model=UserIngestJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={400: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
+    tags=["users"],
+)
+async def ingest_users(
+    request: UserIngestRequest | None = None,
+) -> UserIngestJobResponse:
+    """Ingest users from a JSON file.
+
+    Loads users from the specified JSON file, creates User nodes,
+    links dietary restrictions (HAS_RESTRICTION), and creates
+    ratings (RATED) relationships to dishes.
+
+    - Uses name-based lookup for idempotency (updates existing users)
+    - Requires exact match for dietary restrictions (skips if not found)
+    - Requires exact match for dish names (skips unmatched ratings)
+
+    Args:
+        request: Optional request body with json_path (defaults to "users.json").
+
+    Returns:
+        Job status with ingestion results.
+    """
+    from pathlib import Path
+
+    json_path = request.json_path if request else "users.json"
+
+    # Resolve path relative to project root
+    if not Path(json_path).is_absolute():
+        # Use config or current working directory
+        json_path = Path.cwd() / json_path
+
+    processor = get_processor()
+
+    try:
+        # Use synchronous ingestion for immediate results
+        job = processor.ingest_users_sync(json_path)
+
+        return UserIngestJobResponse(
+            job_id=job.job_id,
+            status=job.status.value,
+            progress=round(job.progress, 2),
+            total_users=job.total_users,
+            created=job.created,
+            updated=job.updated,
+            failed=job.failed,
+            created_at=job.created_at.isoformat(),
+            started_at=job.started_at.isoformat() if job.started_at else None,
+            finished_at=job.finished_at.isoformat() if job.finished_at else None,
+            results=[
+                UserIngestResultResponse(
+                    name=r.name,
+                    success=r.success,
+                    user_id=r.user_id,
+                    is_new=r.is_new,
+                    restriction_linked=r.restriction_linked,
+                    restriction_skipped=r.restriction_skipped,
+                    ratings_linked=r.ratings_linked,
+                    ratings_skipped=r.ratings_skipped,
+                    error=r.error,
+                )
+                for r in job.results
+            ],
+        )
+
+    except FileNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": str(e), "code": "FILE_NOT_FOUND"},
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": str(e), "code": "INVALID_JSON"},
+        )
+
+
+@router.get(
+    "/users",
+    response_model=UsersListResponse,
+    tags=["users"],
+)
+async def get_all_users(limit: int = 100) -> UsersListResponse:
+    """Get all users from the database.
+
+    Args:
+        limit: Maximum number of users to return (default 100).
+
+    Returns:
+        List of users with their dietary restrictions and rating counts.
+    """
+    processor = get_processor()
+    users = processor.neo4j.get_all_users(limit=limit)
+
+    return UsersListResponse(
+        users=[
+            UserSummaryResponse(
+                user_id=u["user_id"],
+                name=u["name"],
+                age=u.get("age"),
+                gender=u.get("gender"),
+                nationality=u.get("nationality"),
+                dietary_restrictions=u.get("dietary_restrictions", []),
+                rating_count=u.get("rating_count", 0),
+            )
+            for u in users
+        ],
+        count=len(users),
+    )
+
+
+@router.get(
+    "/users/{user_id}",
+    response_model=UserResponse,
+    responses={404: {"model": ErrorResponse}},
+    tags=["users"],
+)
+async def get_user(user_id: str) -> UserResponse:
+    """Get a user by ID with their dietary restrictions and ratings.
+
+    Args:
+        user_id: The user identifier.
+
+    Returns:
+        User data with restrictions and ratings.
+    """
+    processor = get_processor()
+    user = processor.neo4j.get_user_by_id(user_id)
+
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "User not found", "code": "USER_NOT_FOUND"},
+        )
+
+    return UserResponse(
+        user_id=user["user_id"],
+        name=user["name"],
+        age=user.get("age"),
+        gender=user.get("gender"),
+        nationality=user.get("nationality"),
+        dietary_restrictions=user.get("dietary_restrictions", []),
+        ratings=[
+            UserRating(
+                dish_name=r["dish_name"],
+                dish_id=r.get("dish_id"),
+                score=r["score"],
+            )
+            for r in user.get("ratings", [])
+        ],
     )
