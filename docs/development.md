@@ -47,8 +47,10 @@ food-recsys/
     ├── api/
     │   └── routes.py       # FastAPI endpoints
     ├── services/
-    │   ├── gemini_extractor.py   # Gemini AI ingredient extraction
+    │   ├── gemma_extractor.py   # Gemma AI ingredient extraction
     │   ├── clip_embedder.py      # CLIP image embedding
+    │   ├── ingredient_embedder.py      # EmbeddingGemma Ingredient embedding
+    │   ├── ingredient_canonicalizer.py      # Canonicalization logic (Ingredient Merging)
     │   └── neo4j_service.py      # Database operations
     └── pipeline/
         └── batch_processor.py    # Background processing
