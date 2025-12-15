@@ -8,6 +8,7 @@ Run with: streamlit run src/visualization/streamlit_app.py
 """
 
 import sys
+import os
 from pathlib import Path
 
 # Add project root to path to enable absolute imports
@@ -32,6 +33,7 @@ from src.visualization.similarity import (
     compute_ingredient_embedding_matrix,
     compute_image_embedding_matrix,
 )
+from src.visualization.recommendation_page import render_recommendations_page
 
 
 # Page configuration
@@ -97,16 +99,9 @@ def api_reject_and_merge_ingredient(api_base_url: str, name: str, merge_into: st
     return resp.json()
 
 
-def render_pending_ingredients_page() -> None:
+def render_pending_ingredients_page(api_base_url: str) -> None:
     st.title("🧪 Pending Ingredients")
     st.markdown("Review pending ingredients and either approve them or merge them into an existing ingredient.")
-
-    st.sidebar.subheader("API")
-    api_base_url = st.sidebar.text_input(
-        "FastAPI base URL",
-        value="http://localhost:8000/api/v1",
-        help="Example: http://localhost:8000/api/v1",
-    ).strip()
 
     col_a, col_b = st.sidebar.columns(2)
     with col_a:
@@ -284,8 +279,23 @@ def fit_aggregator_idf(_service: Neo4jService) -> None:
     
     # Fit the aggregator
     aggregator = get_aggregator(method='tfidf')
-    aggregator.fit_idf(all_recipes)
+        # 1. Fetch all recipes (dish ingredients) for IDF calculation
+    # (You likely already have this part)
+    dishes_data = _service.get_all_dishes_ingredients()
+    all_recipes = [d['ingredients'] for d in dishes_data]
 
+    # 2. Fetch all unique ingredient embeddings for Global Mean Centering
+    print("Fetching ingredient embeddings from Neo4j...")
+    _, all_embeddings = _service.get_all_ingredient_embeddings()
+    
+    # 3. Fit the aggregator with both datasets
+    # This calculates IDF *and* the Global Mean vector
+    aggregator.fit_idf(
+        all_recipes=all_recipes, 
+        all_ingredient_embeddings=all_embeddings
+    )
+    weights = list(aggregator.idf_map.values())
+    print(f"Min IDF: {min(weights)}, Max IDF: {max(weights)}")
 
 @st.cache_data(ttl=300)
 def fetch_dishes_with_embeddings(
@@ -360,14 +370,27 @@ def main():
     """Main Streamlit application."""
     # Sidebar navigation
     st.sidebar.header("⚙️ Settings")
+    
+    # API Configuration
+    st.sidebar.subheader("API")
+    default_api_url = os.getenv("API_BASE_URL", "http://localhost:8000/api/v1")
+    api_base_url = st.sidebar.text_input(
+        "FastAPI base URL",
+        value=default_api_url,
+        help="Example: http://localhost:8000/api/v1",
+    ).strip()
+
     page = st.sidebar.radio(
         "Page",
-        options=["Dish Similarity", "Pending Ingredients"],
+        options=["Dish Similarity", "Pending Ingredients", "Dish Recommendations"],
         index=0,
     )
 
     if page == "Pending Ingredients":
-        render_pending_ingredients_page()
+        render_pending_ingredients_page(api_base_url)
+        return
+    elif page == "Dish Recommendations":
+        render_recommendations_page(api_base_url)
         return
 
     st.title("🍽️ Dish Similarity Matrix")
@@ -385,12 +408,15 @@ def main():
     with st.spinner("Fitting TF-IDF weights..."):
         fit_aggregator_idf(neo4j_service)
 
-    # Manual refit button (Similarity page only)
-    if st.sidebar.button("Refit TF-IDF weights", help="Recompute IDF from all dishes"):
-        with st.spinner("Recomputing TF-IDF weights..."):
+    # Refresh button
+    if st.sidebar.button("Refresh Data", help="Reload dishes and recompute IDF weights"):
+        with st.spinner("Refreshing data..."):
+            fetch_dishes_summary.clear()
+            fetch_dishes_with_embeddings.clear()
             fit_aggregator_idf.clear()
             fit_aggregator_idf(neo4j_service)
-        st.sidebar.success("TF-IDF weights refreshed")
+        st.sidebar.success("Data refreshed")
+        st.rerun()
 
     # Max dishes limit
     max_dishes = st.sidebar.number_input(
@@ -421,7 +447,7 @@ def main():
     selected_names = st.sidebar.multiselect(
         "Select dishes to compare",
         options=dish_names,
-        default=dish_names[:min(10, len(dish_names))],
+        default=dish_names,
         help="Choose dishes to include in the similarity matrix",
     )
 

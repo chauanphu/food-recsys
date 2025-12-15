@@ -8,10 +8,32 @@ Implements three different similarity measures:
 
 import numpy as np
 from numpy.typing import NDArray
-
+from src.services.neo4j_service import Neo4jService
 from src.visualization.dish_aggregator import get_aggregator
 
 aggregator = get_aggregator(method='tfidf')
+
+def initialize_aggregator():
+    neo4j = Neo4jService()
+    aggregator = get_aggregator(method='tfidf')
+
+    # 1. Fetch all recipes (dish ingredients) for IDF calculation
+    # (You likely already have this part)
+    dishes_data = neo4j.get_all_dishes_ingredients()
+    all_recipes = [d['ingredients'] for d in dishes_data]
+
+    # 2. Fetch all unique ingredient embeddings for Global Mean Centering
+    print("Fetching ingredient embeddings from Neo4j...")
+    all_names, all_embeddings = neo4j.get_all_ingredient_embeddings()
+    
+    # 3. Fit the aggregator with both datasets
+    # This calculates IDF *and* the Global Mean vector
+    aggregator.fit_idf(
+        all_recipes=all_recipes, 
+        all_ingredient_embeddings=all_embeddings
+    )
+    print(f"Aggregator initialized. Global mean computed from {len(all_embeddings)} ingredients.")
+    neo4j.close()
 
 def jaccard_similarity(set_a: set, set_b: set) -> float:
     """Compute Jaccard similarity between two sets.

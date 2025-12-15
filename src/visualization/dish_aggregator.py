@@ -19,7 +19,7 @@ class DishAggregator:
             )
             self.query_token = nn.Parameter(torch.randn(1, 1, embedding_dim))
 
-    def fit_idf(self, all_recipes: list[list[str]]):
+    def fit_idf(self, all_recipes: list[list[str]], all_ingredient_embeddings: list[list[float]] | None = None):
         """
         Pre-compute IDF scores for all ingredients in your dataset.
         Call this ONCE before processing dishes.
@@ -37,6 +37,17 @@ class DishAggregator:
             ing: math.log((doc_count + 1) / (count + 1)) + 1
             for ing, count in df_counter.items()
         }
+        # 2. IDF Power Scaling (Boost variance)
+        # Squaring the IDF gives much higher penalty to common terms
+        for ing in self.idf_map:
+             self.idf_map[ing] = self.idf_map[ing] ** 2
+
+        if all_ingredient_embeddings:
+            # Stack all unique ingredient embeddings
+            matrix = np.array(all_ingredient_embeddings)
+            self.ingredient_global_mean = np.mean(matrix, axis=0)
+            print("Global ingredient mean computed. This will be subtracted from vectors.")
+
         print(f"IDF fitted on {doc_count} recipes. Top-3 rarest: {list(df_counter.most_common()[:-4:-1])}")
 
     def aggregate(self, ingredient_embeddings: list[list[float]], ingredient_names: list[str]) -> list[float]:

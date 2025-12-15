@@ -701,8 +701,19 @@ class BatchProcessor:
         with open(json_path, "r", encoding="utf-8") as f:
             users = json.load(f)
 
+        return self.process_users_sync(users)
+
+    def process_users_sync(self, users: list[dict]) -> UserIngestJob:
+        """Synchronously process a list of user data.
+
+        Args:
+            users: List of user dictionaries.
+
+        Returns:
+            UserIngestJob with complete results.
+        """
         if not isinstance(users, list):
-            raise ValueError("JSON file must contain an array of users")
+            raise ValueError("User data must be a list of users")
 
         job_id = str(uuid.uuid4())
         job = UserIngestJob(job_id=job_id, total_users=len(users))

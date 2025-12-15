@@ -12,6 +12,7 @@ Design:
 
 import logging
 import os
+import json
 import uuid
 from pathlib import Path
 from typing import Annotated
@@ -21,6 +22,8 @@ from pydantic import BaseModel, Field
 
 from src.config import config
 from src.pipeline.batch_processor import get_processor
+from src.services.recommendation_service import get_recommendation_service
+from src.services.clip_embedder import get_clip_embedder
 
 # Create API router
 router = APIRouter(prefix="/api/v1", tags=["dishes"])
@@ -84,6 +87,24 @@ class ProcessResponse(BaseModel):
     upload_errors: list[UploadError] | None = None
 
 
+class DishSearchResult(BaseModel):
+    """Result of a dish search."""
+
+    dish_id: str
+    name: str
+    description: str | None = None
+    ingredients: list[str] = Field(default_factory=list)
+    score: float
+    image_url: str | None = None
+
+
+class DishSearchResponse(BaseModel):
+    """Response from dish search endpoint."""
+
+    results: list[DishSearchResult]
+    count: int
+
+
 class ErrorResponse(BaseModel):
     """Standard error response."""
 
@@ -102,6 +123,23 @@ class IngredientsResponse(BaseModel):
     """Response from ingredients endpoint."""
 
     ingredients: list[str]
+    count: int
+
+
+class DishSummary(BaseModel):
+    """Summary of a dish."""
+
+    dish_id: str
+    name: str
+    description: str | None = None
+    image_url: str | None = None
+    country: str | None = None
+
+
+class DishesResponse(BaseModel):
+    """Response for list of dishes."""
+
+    dishes: list[DishSummary]
     count: int
 
 
@@ -246,15 +284,6 @@ class UserIngestJobResponse(BaseModel):
     started_at: str | None = None
     finished_at: str | None = None
     results: list[UserIngestResultResponse] = Field(default_factory=list)
-
-
-class UserIngestRequest(BaseModel):
-    """Request body for user ingestion endpoint."""
-
-    json_path: str = Field(
-        default="users.json",
-        description="Path to JSON file containing user data",
-    )
 
 
 # =========================================================================
@@ -499,6 +528,29 @@ async def get_job_status(job_id: str) -> dict:
     return job.to_dict()
 
 
+@router.get("/dishes/", response_model=DishesResponse)
+async def get_dishes(
+    limit: int = 100,
+    skip: int = 0,
+) -> DishesResponse:
+    """Get a list of dishes.
+
+    Args:
+        limit: Maximum number of dishes to return.
+        skip: Number of dishes to skip.
+
+    Returns:
+        List of dishes.
+    """
+    processor = get_processor()
+    dishes = processor.neo4j.get_dishes(limit=limit, skip=skip)
+
+    return DishesResponse(
+        dishes=[DishSummary(**d) for d in dishes],
+        count=len(dishes),
+    )
+
+
 @router.get(
     "/dishes/{dish_id}",
     responses={404: {"model": ErrorResponse}},
@@ -521,6 +573,87 @@ async def get_dish(dish_id: str) -> dict:
         )
 
     return dish
+
+
+@router.post(
+    "/dishes/search-by-image",
+    response_model=DishSearchResponse,
+    responses={400: {"model": ErrorResponse}},
+)
+async def search_dishes_by_image(
+    image: Annotated[UploadFile, File(description="Dish image to search for")],
+    limit: int = 5,
+    threshold: float = 0.7,
+) -> DishSearchResponse:
+    """Search for similar dishes using an image.
+
+    Args:
+        image: The image file to search with.
+        limit: Maximum number of results.
+        threshold: Minimum similarity score.
+
+    Returns:
+        List of similar dishes with ingredients.
+    """
+    if not image.filename:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "No image provided", "code": "NO_IMAGE"},
+        )
+
+    if not allowed_file(image.filename):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": f"Invalid file type. Allowed: {', '.join(config.ALLOWED_EXTENSIONS)}",
+                "code": "INVALID_FILE_TYPE",
+            },
+        )
+
+    try:
+        # Save temp file
+        item = await save_uploaded_file(image)
+        temp_path = item["temp_path"]
+
+        # Generate embedding
+        embedder = get_clip_embedder()
+        embedding = embedder.embed_image(temp_path)
+
+        # Search in Neo4j
+        processor = get_processor()
+        results = processor.neo4j.find_similar_dishes_by_embedding(
+            embedding=embedding,
+            k=limit,
+            threshold=threshold,
+        )
+
+        # Cleanup temp file
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+
+        return DishSearchResponse(
+            results=[
+                DishSearchResult(
+                    dish_id=r["dish_id"],
+                    name=r["name"],
+                    description=r.get("description"),
+                    ingredients=r.get("ingredients", []),
+                    score=r["score"],
+                    image_url=r.get("image_url"),
+                )
+                for r in results
+            ],
+            count=len(results),
+        )
+
+    except Exception as e:
+        logging.error("Search failed: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": str(e), "code": "SEARCH_FAILED"},
+        )
 
 
 @router.get("/ingredients", response_model=IngredientsResponse)
@@ -713,11 +846,11 @@ async def reject_ingredient(
     tags=["users"],
 )
 async def ingest_users(
-    request: UserIngestRequest | None = None,
+    file: UploadFile = File(..., description="JSON file containing user data"),
 ) -> UserIngestJobResponse:
     """Ingest users from a JSON file.
 
-    Loads users from the specified JSON file, creates User nodes,
+    Loads users from the uploaded JSON file, creates User nodes,
     links dietary restrictions (HAS_RESTRICTION), and creates
     ratings (RATED) relationships to dishes.
 
@@ -726,25 +859,37 @@ async def ingest_users(
     - Requires exact match for dish names (skips unmatched ratings)
 
     Args:
-        request: Optional request body with json_path (defaults to "users.json").
+        file: JSON file containing user data.
 
     Returns:
         Job status with ingestion results.
     """
-    from pathlib import Path
+    if file.content_type != "application/json" and not file.filename.endswith(".json"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "File must be a JSON file", "code": "INVALID_FILE_TYPE"},
+        )
 
-    json_path = request.json_path if request else "users.json"
+    try:
+        content = await file.read()
+        users = json.loads(content)
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Invalid JSON format", "code": "INVALID_JSON"},
+        )
 
-    # Resolve path relative to project root
-    if not Path(json_path).is_absolute():
-        # Use config or current working directory
-        json_path = Path.cwd() / json_path
+    if not isinstance(users, list):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "JSON must contain a list of users", "code": "INVALID_DATA_FORMAT"},
+        )
 
     processor = get_processor()
 
     try:
         # Use synchronous ingestion for immediate results
-        job = processor.ingest_users_sync(json_path)
+        job = processor.process_users_sync(users)
 
         return UserIngestJobResponse(
             job_id=job.job_id,
@@ -772,16 +917,11 @@ async def ingest_users(
                 for r in job.results
             ],
         )
-
-    except FileNotFoundError as e:
+    except Exception as e:
+        logging.error(f"Error ingesting users: {e}", exc_info=True)
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"error": str(e), "code": "FILE_NOT_FOUND"},
-        )
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error": str(e), "code": "INVALID_JSON"},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": str(e), "code": "INGESTION_FAILED"},
         )
 
 
@@ -858,4 +998,111 @@ async def get_user(user_id: str) -> UserResponse:
             )
             for r in user.get("ratings", [])
         ],
+    )
+
+
+@router.get(
+    "/users/{user_id}/recommendations",
+    response_model=RecommendationsResponse,
+    responses={404: {"model": ErrorResponse}},
+    tags=["recommendations"],
+)
+async def get_recommendations(
+    user_id: str,
+    limit: int = 10,
+    method: str = "collaborative",
+) -> RecommendationsResponse:
+    """Get dish recommendations for a user.
+
+    Args:
+        user_id: The user identifier.
+        limit: Maximum number of recommendations.
+        method: Recommendation method ('collaborative' or 'content_based').
+
+    Returns:
+        List of recommended dishes.
+    """
+    processor = get_processor()
+    user = processor.neo4j.get_user_by_id(user_id)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "User not found", "code": "USER_NOT_FOUND"},
+        )
+
+    rec_service = get_recommendation_service()
+    
+    if method == "content_based":
+        recs = rec_service.recommend_content_based(user_id=user_id, k=limit)
+        method_used = "content_based"
+    else:
+        recs = rec_service.recommend_dishes(user_id=user_id, k=limit)
+        # Check if it fell back to popular
+        if recs and recs[0].reason == "popular_dish":
+            method_used = "popular_fallback"
+        else:
+            method_used = "collaborative_filtering"
+
+    return RecommendationsResponse(
+        user_id=user_id,
+        recommendations=[
+            DishRecommendationResponse(
+                dish_id=r.dish_id,
+                name=r.name,
+                predicted_score=r.predicted_score,
+                description=r.description,
+                ingredients=r.ingredients,
+                recommender_count=r.recommender_count,
+                reason=r.reason,
+            )
+            for r in recs
+        ],
+        count=len(recs),
+        method=method_used,
+    )
+
+
+@router.get(
+    "/users/{user_id}/similar",
+    response_model=SimilarUsersResponse,
+    responses={404: {"model": ErrorResponse}},
+    tags=["recommendations"],
+)
+async def get_similar_users(
+    user_id: str,
+    limit: int = 10,
+) -> SimilarUsersResponse:
+    """Get users similar to the target user.
+
+    Args:
+        user_id: The user identifier.
+        limit: Maximum number of similar users.
+
+    Returns:
+        List of similar users.
+    """
+    processor = get_processor()
+    user = processor.neo4j.get_user_by_id(user_id)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "User not found", "code": "USER_NOT_FOUND"},
+        )
+
+    rec_service = get_recommendation_service()
+    similar = rec_service.find_similar_users(user_id=user_id, k=limit)
+
+    return SimilarUsersResponse(
+        user_id=user_id,
+        similar_users=[
+            SimilarUserResponse(
+                user_id=u.user_id,
+                name=u.name,
+                similarity=u.similarity,
+                shared_dishes=u.shared_dishes,
+            )
+            for u in similar
+        ],
+        count=len(similar),
+        similarity_threshold=0.5,  # Hardcoded for now, matches service constant
     )

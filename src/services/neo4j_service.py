@@ -118,6 +118,25 @@ class Neo4jService:
             session.run(cast(Any, vector_index_query))
             created.append("ingredient_embeddings_vector_index")
 
+            # Create vector index for dish image embeddings (512 dimensions)
+            # Drop existing index if dimensions don't match
+            drop_dish_index_query = """
+            DROP INDEX dish_image_embeddings IF EXISTS
+            """
+            session.run(cast(Any, drop_dish_index_query))
+            
+            dish_vector_index_query = """
+            CREATE VECTOR INDEX dish_image_embeddings IF NOT EXISTS
+            FOR (d:Dish)
+            ON d.image_embedding
+            OPTIONS {indexConfig: {
+                `vector.dimensions`: 512,
+                `vector.similarity_function`: 'cosine'
+            }}
+            """
+            session.run(cast(Any, dish_vector_index_query))
+            created.append("dish_image_embeddings_vector_index")
+
         return created
 
     def merge_dish_with_ingredients(
@@ -312,6 +331,33 @@ class Neo4jService:
                 return dict(result)
             return None
 
+    def get_dishes(self, limit: int = 100, skip: int = 0) -> list[dict[str, Any]]:
+        """Retrieve a list of dishes.
+
+        Args:
+            limit: Maximum number of dishes to return.
+            skip: Number of dishes to skip.
+
+        Returns:
+            List of dictionaries with dish data.
+        """
+        query = """
+        MATCH (d:Dish)
+        OPTIONAL MATCH (d)-[:ORIGINATES_FROM]->(c:Country)
+        RETURN d.dish_id AS dish_id,
+               d.name AS name,
+               d.description AS description,
+               d.image_url AS image_url,
+               c.name AS country
+        ORDER BY d.name
+        SKIP $skip
+        LIMIT $limit
+        """
+
+        with self.session() as session:
+            result = session.run(query, skip=skip, limit=limit)
+            return [dict(record) for record in result]
+
     def get_all_ingredients(self) -> list[str]:
         """Retrieve all unique ingredient names.
 
@@ -327,6 +373,46 @@ class Neo4jService:
     # =========================================================================
     # Ingredient Canonicalization Methods
     # =========================================================================
+
+    def find_similar_dishes_by_embedding(
+        self,
+        embedding: list[float],
+        k: int = 5,
+        threshold: float = 0.0,
+    ) -> list[dict[str, Any]]:
+        """Find similar dishes using vector similarity search on image embeddings.
+
+        Args:
+            embedding: The query embedding vector (512 dimensions).
+            k: Number of nearest neighbors to return.
+            threshold: Minimum similarity score (0-1).
+
+        Returns:
+            List of dictionaries with dish details and score.
+        """
+        query = """
+        CALL db.index.vector.queryNodes('dish_image_embeddings', $k, $embedding)
+        YIELD node AS d, score
+        WHERE score >= $threshold
+        
+        OPTIONAL MATCH (d)-[:CONTAINS]->(i:Ingredient)
+        
+        RETURN d.dish_id AS dish_id,
+               d.name AS name,
+               d.description AS description,
+               d.image_url AS image_url,
+               collect(DISTINCT i.name) AS ingredients,
+               score
+        """
+
+        with self.session() as session:
+            result = session.run(
+                query,
+                embedding=embedding,
+                k=k,
+                threshold=threshold,
+            )
+            return [dict(record) for record in result]
 
     def find_similar_ingredients(
         self,
@@ -644,7 +730,31 @@ class Neo4jService:
         with self.session() as session:
             result = session.run(query, name=name, description=description).single()
             return dict(result) if result else {"name": name.lower().strip(), "description": description}
+        
+    def get_all_ingredient_embeddings(self) -> tuple[list[str], list[list[float]]]:
+            """Retrieve all ingredient names and their embeddings.
+            
+            Used for initializing the DishAggregator to compute the global mean
+            for vector centering.
 
+            Returns:
+                Tuple of (list of names, list of embedding vectors)
+            """
+            query = """
+            MATCH (i:Ingredient)
+            WHERE i.embedding IS NOT NULL
+            RETURN i.name AS name, i.embedding AS embedding
+            """
+
+            with self.session() as session:
+                result = session.run(query)
+                names = []
+                embeddings = []
+                for record in result:
+                    names.append(record["name"])
+                    embeddings.append(record["embedding"])
+                return names, embeddings
+        
     def create_ingredient_restriction_relationship(
         self,
         ingredient_name: str,
@@ -1531,3 +1641,61 @@ class Neo4jService:
                 restriction_names=[r.lower().strip() for r in restriction_names],
             )
             return [record["dish_id"] for record in result]
+
+    def get_content_based_recommendations(
+        self,
+        user_id: str,
+        limit: int = 10,
+        min_rating: int = 4,
+    ) -> list[dict[str, Any]]:
+        """Get content-based recommendations based on user's liked ingredients.
+
+        Args:
+            user_id: The user identifier.
+            limit: Maximum number of recommendations.
+            min_rating: Minimum rating to consider a dish as "liked".
+
+        Returns:
+            List of recommended dishes with Jaccard score.
+        """
+        query = """
+        // 1. Get ingredients from dishes the user likes (score >= min_rating)
+        MATCH (u:User {user_id: $user_id})-[r:RATED]->(liked:Dish)-[:CONTAINS]->(i:Ingredient)
+        WHERE r.score >= $min_rating
+        WITH u, collect(DISTINCT i.name) AS user_ingredients
+
+        // 2. Find other dishes and their ingredients
+        MATCH (d:Dish)-[:CONTAINS]->(i:Ingredient)
+        WHERE NOT (u)-[:RATED]->(d)
+        WITH d, user_ingredients, collect(DISTINCT i.name) AS dish_ingredients
+
+        // 3. Compute Jaccard similarity
+        // Intersection: ingredients in both user_ingredients and dish_ingredients
+        // Union: user_ingredients + dish_ingredients - intersection
+        WITH d, user_ingredients, dish_ingredients,
+             [x IN user_ingredients WHERE x IN dish_ingredients] AS intersection
+        WITH d, user_ingredients, dish_ingredients, intersection,
+             size(intersection) AS intersection_size,
+             size(user_ingredients) + size(dish_ingredients) - size(intersection) AS union_size
+        
+        WHERE union_size > 0
+        WITH d, dish_ingredients, toFloat(intersection_size) / toFloat(union_size) AS jaccard_score
+        
+        RETURN d.dish_id AS dish_id,
+               d.name AS name,
+               d.description AS description,
+               dish_ingredients AS ingredients,
+               jaccard_score AS score
+        ORDER BY jaccard_score DESC
+        LIMIT $limit
+        """
+
+        with self.session() as session:
+            result = session.run(
+                query,
+                user_id=user_id,
+                min_rating=min_rating,
+                limit=limit,
+            )
+            return [dict(record) for record in result]
+

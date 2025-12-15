@@ -14,7 +14,6 @@ dependencies = [
     "Pillow>=10.0.0",
     "transformers>=4.46.0",
     "torch>=2.5.0",
-    "ollama>=0.6.1",
     "accelerate>=1.12.0",
     "notebook>=7.5.0",
     "ipykernel>=7.1.0",

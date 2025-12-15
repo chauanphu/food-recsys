@@ -11,3 +11,4 @@ wheels/
 .env
 food-recsys.log
 *.csv
+users_survey.json

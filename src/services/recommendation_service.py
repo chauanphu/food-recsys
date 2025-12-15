@@ -300,6 +300,62 @@ class RecommendationService:
             apply_dietary_filter=apply_dietary_filter,
         )
 
+    def recommend_content_based(
+        self,
+        user_id: str,
+        k: int = 10,
+        apply_dietary_filter: bool = True,
+    ) -> list[DishRecommendation]:
+        """Recommend dishes using content-based filtering (ingredient similarity).
+
+        Args:
+            user_id: Target user ID.
+            k: Maximum number of recommendations.
+            apply_dietary_filter: Whether to filter by dietary restrictions.
+
+        Returns:
+            List of DishRecommendation objects.
+        """
+        # Get content-based recommendations from Neo4j
+        raw_recs = self.neo4j.get_content_based_recommendations(
+            user_id=user_id,
+            limit=k * 2,  # Fetch more to allow for filtering
+            min_rating=4,
+        )
+
+        if not raw_recs:
+            logging.info("No content-based recommendations found for %s", user_id)
+            return []
+
+        # Apply dietary restriction filter
+        if apply_dietary_filter:
+            restrictions = self.neo4j.get_user_dietary_restrictions(user_id)
+            if restrictions:
+                candidate_dish_ids = [d["dish_id"] for d in raw_recs]
+                safe_dish_ids = set(
+                    self.neo4j.filter_dishes_by_restrictions(
+                        dish_ids=candidate_dish_ids,
+                        restriction_names=restrictions,
+                    )
+                )
+                raw_recs = [d for d in raw_recs if d["dish_id"] in safe_dish_ids]
+
+        recommendations = []
+        for dish in raw_recs[:k]:
+            recommendations.append(
+                DishRecommendation(
+                    dish_id=dish["dish_id"],
+                    name=dish["name"],
+                    predicted_score=round(dish["score"], 3),  # Jaccard score
+                    description=dish.get("description"),
+                    ingredients=dish.get("ingredients", []),
+                    recommender_count=0,  # Not applicable for content-based
+                    reason="content_based",
+                )
+            )
+
+        return recommendations
+
     def _recommend_popular_dishes(
         self,
         user_id: str,
@@ -380,7 +436,7 @@ class RecommendationService:
         # Find similar users
         similar_users = self.find_similar_users(
             user_id=user_id,
-            k=20,  # Consider top 20 similar users
+            k=10,  # Consider top 20 similar users
             min_similarity=SIMILARITY_THRESHOLD,
         )
 
