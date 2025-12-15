@@ -230,8 +230,8 @@ class UserResponse(BaseModel):
 
     user_id: str
     name: str
-    age: int | None = None
-    gender: int | None = None
+    age: int | str | None = None
+    gender: int | str | None = None
     nationality: str | None = None
     dietary_restrictions: list[str] = Field(default_factory=list)
     ratings: list[UserRating] = Field(default_factory=list)
@@ -242,8 +242,8 @@ class UserSummaryResponse(BaseModel):
 
     user_id: str
     name: str
-    age: int | None = None
-    gender: int | None = None
+    age: int | str | None = None
+    gender: int | str | None = None
     nationality: str | None = None
     dietary_restrictions: list[str] = Field(default_factory=list)
     rating_count: int = 0
@@ -1011,6 +1011,7 @@ async def get_recommendations(
     user_id: str,
     limit: int = 10,
     method: str = "collaborative",
+    metric: str = "cosine",
 ) -> RecommendationsResponse:
     """Get dish recommendations for a user.
 
@@ -1018,6 +1019,7 @@ async def get_recommendations(
         user_id: The user identifier.
         limit: Maximum number of recommendations.
         method: Recommendation method ('collaborative' or 'content_based').
+        metric: Similarity metric ('cosine', 'jaccard', or 'embedding').
 
     Returns:
         List of recommended dishes.
@@ -1033,15 +1035,27 @@ async def get_recommendations(
     rec_service = get_recommendation_service()
     
     if method == "content_based":
-        recs = rec_service.recommend_content_based(user_id=user_id, k=limit)
-        method_used = "content_based"
+        # For content-based, 'embedding' metric means using image embeddings
+        # 'jaccard' means using ingredient overlap
+        # 'cosine' is not strictly supported for ingredients unless we embed them, 
+        # but let's map 'cosine' to 'embedding' if user asks, or default to jaccard?
+        # Actually, let's stick to what we implemented: 'jaccard' or 'embedding'
+        if metric not in ["jaccard", "embedding"]:
+            metric = "jaccard" # Default for content-based
+            
+        recs = rec_service.recommend_content_based(user_id=user_id, k=limit, metric=metric)
+        method_used = f"content_based_{metric}"
     else:
-        recs = rec_service.recommend_dishes(user_id=user_id, k=limit)
+        # For collaborative, 'cosine' or 'jaccard' on user vectors
+        if metric not in ["cosine", "jaccard"]:
+            metric = "cosine" # Default for collaborative
+            
+        recs = rec_service.recommend_dishes(user_id=user_id, k=limit, metric=metric)
         # Check if it fell back to popular
         if recs and recs[0].reason == "popular_dish":
             method_used = "popular_fallback"
         else:
-            method_used = "collaborative_filtering"
+            method_used = f"collaborative_filtering_{metric}"
 
     return RecommendationsResponse(
         user_id=user_id,

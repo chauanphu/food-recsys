@@ -105,8 +105,12 @@ class RecommendationService:
             len(ratings),
         )
 
-    def _compute_user_similarity(self) -> None:
-        """Compute user-user similarity matrix using cosine similarity."""
+    def _compute_user_similarity(self, metric: str = "cosine") -> None:
+        """Compute user-user similarity matrix.
+
+        Args:
+            metric: Similarity metric ('cosine' or 'jaccard').
+        """
         if self._rating_matrix is None or self._rating_matrix.size == 0:
             self._build_rating_matrix()
 
@@ -117,20 +121,57 @@ class RecommendationService:
         n_users = len(self._user_ids)
         self._user_similarity_matrix = np.zeros((n_users, n_users), dtype=np.float64)
 
-        # Compute cosine similarity between users
+        # Compute similarity between users
         for i in range(n_users):
             for j in range(i, n_users):
                 if i == j:
                     self._user_similarity_matrix[i, j] = 1.0
                 else:
-                    sim = self._cosine_similarity(
-                        self._rating_matrix[i],
-                        self._rating_matrix[j],
-                    )
+                    if metric == "jaccard":
+                        sim = self._jaccard_similarity(
+                            self._rating_matrix[i],
+                            self._rating_matrix[j],
+                        )
+                    else:
+                        sim = self._cosine_similarity(
+                            self._rating_matrix[i],
+                            self._rating_matrix[j],
+                        )
                     self._user_similarity_matrix[i, j] = sim
                     self._user_similarity_matrix[j, i] = sim
 
-        logging.info("Computed user similarity matrix: %d x %d", n_users, n_users)
+        logging.info("Computed user similarity matrix (%s): %d x %d", metric, n_users, n_users)
+
+    def _jaccard_similarity(
+        self,
+        vec1: NDArray[np.float64],
+        vec2: NDArray[np.float64],
+    ) -> float:
+        """Compute Jaccard similarity between two rating vectors.
+
+        J(A, B) = |A ∩ B| / |A ∪ B|
+        Considers items rated > 0 as present.
+
+        Args:
+            vec1: First user's rating vector.
+            vec2: Second user's rating vector.
+
+        Returns:
+            Jaccard similarity score between 0 and 1.
+        """
+        set1 = set(np.where(vec1 > 0)[0])
+        set2 = set(np.where(vec2 > 0)[0])
+
+        if not set1 and not set2:
+            return 0.0
+
+        intersection = len(set1.intersection(set2))
+        union = len(set1.union(set2))
+
+        if union == 0:
+            return 0.0
+
+        return float(intersection / union)
 
     def _cosine_similarity(
         self,
@@ -169,12 +210,12 @@ class RecommendationService:
 
         return float(np.dot(v1_centered, v2_centered) / (norm1 * norm2))
 
-    def refresh_cache(self) -> None:
+    def refresh_cache(self, metric: str = "cosine") -> None:
         """Refresh the cached rating matrix and similarity matrix."""
         self._rating_matrix = None
         self._user_similarity_matrix = None
         self._build_rating_matrix()
-        self._compute_user_similarity()
+        self._compute_user_similarity(metric=metric)
 
         # Cache user names
         users = self.neo4j.get_all_users(limit=1000)
@@ -185,6 +226,7 @@ class RecommendationService:
         user_id: str,
         k: int = 10,
         min_similarity: float = SIMILARITY_THRESHOLD,
+        metric: str = "cosine",
     ) -> list[SimilarUser]:
         """Find users most similar to the target user.
 
@@ -192,12 +234,23 @@ class RecommendationService:
             user_id: Target user ID.
             k: Maximum number of similar users to return.
             min_similarity: Minimum similarity threshold (default > 0.5).
+            metric: Similarity metric ('cosine' or 'jaccard').
 
         Returns:
             List of SimilarUser objects sorted by similarity.
         """
+        # Check if we need to recompute matrix for different metric
+        # Note: This is a simple check, ideally we'd cache both matrices
         if self._user_similarity_matrix is None:
-            self.refresh_cache()
+            self.refresh_cache(metric=metric)
+        
+        # If we want to support switching metrics dynamically without full reload,
+        # we might need to store the current metric state or compute on demand.
+        # For now, let's recompute if requested metric differs (simplified)
+        # In a real app, we'd probably cache both or pass metric to _compute_user_similarity
+        # But _compute_user_similarity updates self._user_similarity_matrix in place.
+        # Let's just recompute for now to be safe and correct.
+        self._compute_user_similarity(metric=metric)
 
         if self._user_similarity_matrix is None or self._rating_matrix is None:
             logging.warning("Failed to build similarity matrix")
@@ -264,6 +317,7 @@ class RecommendationService:
         user_id: str,
         k: int = 10,
         apply_dietary_filter: bool = True,
+        metric: str = "cosine",
     ) -> list[DishRecommendation]:
         """Recommend dishes for a user using collaborative filtering.
 
@@ -274,6 +328,7 @@ class RecommendationService:
             user_id: Target user ID.
             k: Maximum number of recommendations.
             apply_dietary_filter: Whether to filter by user's dietary restrictions.
+            metric: Similarity metric ('cosine' or 'jaccard').
 
         Returns:
             List of DishRecommendation objects.
@@ -298,6 +353,7 @@ class RecommendationService:
             user_id=user_id,
             k=k,
             apply_dietary_filter=apply_dietary_filter,
+            metric=metric,
         )
 
     def recommend_content_based(
@@ -305,23 +361,49 @@ class RecommendationService:
         user_id: str,
         k: int = 10,
         apply_dietary_filter: bool = True,
+        metric: str = "jaccard",
     ) -> list[DishRecommendation]:
-        """Recommend dishes using content-based filtering (ingredient similarity).
+        """Recommend dishes using content-based filtering.
 
         Args:
             user_id: Target user ID.
             k: Maximum number of recommendations.
             apply_dietary_filter: Whether to filter by dietary restrictions.
+            metric: Similarity metric ('jaccard' for ingredients, 'embedding' for image embeddings).
 
         Returns:
             List of DishRecommendation objects.
         """
-        # Get content-based recommendations from Neo4j
-        raw_recs = self.neo4j.get_content_based_recommendations(
-            user_id=user_id,
-            limit=k * 2,  # Fetch more to allow for filtering
-            min_rating=4,
-        )
+        if metric == "embedding":
+            # 1. Get embeddings of dishes liked by user
+            liked_embeddings = self.neo4j.get_user_liked_dish_embeddings(user_id, min_rating=4)
+            
+            if not liked_embeddings:
+                logging.info("No liked dishes with embeddings found for %s", user_id)
+                return []
+
+            # 2. Compute user profile vector (mean of liked dish embeddings)
+            user_profile = np.mean(liked_embeddings, axis=0).tolist()
+
+            # 3. Find similar dishes using vector search
+            # We fetch more candidates to allow for filtering
+            raw_recs = self.neo4j.find_similar_dishes_by_embedding(
+                embedding=user_profile,
+                k=k * 3,
+                threshold=0.0, # Return top k regardless of threshold
+            )
+            
+            # Filter out dishes the user has already rated
+            rated_ids = self.neo4j.get_rated_dish_ids(user_id)
+            raw_recs = [d for d in raw_recs if d["dish_id"] not in rated_ids]
+            
+        else:
+            # Default to Jaccard on ingredients
+            raw_recs = self.neo4j.get_content_based_recommendations(
+                user_id=user_id,
+                limit=k * 2,
+                min_rating=4,
+            )
 
         if not raw_recs:
             logging.info("No content-based recommendations found for %s", user_id)
@@ -346,11 +428,11 @@ class RecommendationService:
                 DishRecommendation(
                     dish_id=dish["dish_id"],
                     name=dish["name"],
-                    predicted_score=round(dish["score"], 3),  # Jaccard score
+                    predicted_score=round(dish["score"], 3),
                     description=dish.get("description"),
                     ingredients=dish.get("ingredients", []),
-                    recommender_count=0,  # Not applicable for content-based
-                    reason="content_based",
+                    recommender_count=0,
+                    reason=f"content_based_{metric}",
                 )
             )
 
@@ -422,6 +504,7 @@ class RecommendationService:
         user_id: str,
         k: int = 10,
         apply_dietary_filter: bool = True,
+        metric: str = "cosine",
     ) -> list[DishRecommendation]:
         """Recommend dishes using user-based collaborative filtering.
 
@@ -429,6 +512,7 @@ class RecommendationService:
             user_id: Target user ID.
             k: Maximum number of recommendations.
             apply_dietary_filter: Whether to filter by dietary restrictions.
+            metric: Similarity metric ('cosine' or 'jaccard').
 
         Returns:
             List of DishRecommendation objects.
@@ -438,6 +522,7 @@ class RecommendationService:
             user_id=user_id,
             k=10,  # Consider top 20 similar users
             min_similarity=SIMILARITY_THRESHOLD,
+            metric=metric,
         )
 
         if not similar_users:

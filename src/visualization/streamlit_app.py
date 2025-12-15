@@ -260,6 +260,18 @@ def fetch_dishes_summary(_service: Neo4jService, limit: int) -> list[dict]:
     return _service.get_dishes_summary(limit=limit)
 
 
+@st.cache_data(ttl=300)
+def fetch_random_dishes_summary(_service: Neo4jService, limit: int) -> list[dict]:
+    """Fetch random dish summary from Neo4j with caching."""
+    return _service.get_random_dishes_summary(limit=limit)
+
+
+@st.cache_data(ttl=60)
+def search_dishes_summary(_service: Neo4jService, query: str, limit: int) -> list[dict]:
+    """Search dishes by name from Neo4j with caching."""
+    return _service.search_dishes_summary(query, limit=limit)
+
+
 @st.cache_resource
 def fit_aggregator_idf(_service: Neo4jService) -> None:
     """Fit the TF-IDF aggregator with all recipes from the database.
@@ -418,21 +430,81 @@ def main():
         st.sidebar.success("Data refreshed")
         st.rerun()
 
-    # Max dishes limit
-    max_dishes = st.sidebar.number_input(
-        "Maximum dishes to load",
-        min_value=2,
-        max_value=100,
-        value=30,
-        step=5,
-        help="Limit the number of dishes loaded from the database",
+    # Selection Mode
+    selection_mode = st.sidebar.radio(
+        "Selection Mode",
+        options=["Top N Dishes", "Random N Dishes", "Manual Search"],
+        index=0,
     )
 
-    # Fetch available dishes
-    with st.spinner("Loading dishes from database..."):
-        dishes_summary = fetch_dishes_summary(neo4j_service, limit=max_dishes)
+    dishes_summary = []
+
+    if selection_mode == "Top N Dishes":
+        # Max dishes limit
+        max_dishes = st.sidebar.number_input(
+            "Maximum dishes to load",
+            min_value=2,
+            max_value=100,
+            value=30,
+            step=5,
+            help="Limit the number of dishes loaded from the database",
+        )
+        # Fetch available dishes
+        with st.spinner("Loading dishes from database..."):
+            dishes_summary = fetch_dishes_summary(neo4j_service, limit=max_dishes)
+
+    elif selection_mode == "Random N Dishes":
+        max_dishes = st.sidebar.number_input(
+            "Number of random dishes",
+            min_value=2,
+            max_value=100,
+            value=30,
+            step=5,
+        )
+        if st.sidebar.button("Shuffle Random Dishes"):
+             fetch_random_dishes_summary.clear()
+             
+        with st.spinner("Loading random dishes..."):
+            dishes_summary = fetch_random_dishes_summary(neo4j_service, limit=max_dishes)
+
+    elif selection_mode == "Manual Search":
+        st.sidebar.markdown("### Search & Add")
+        search_query = st.sidebar.text_input("Search dish by name")
+        
+        # Initialize session state for manually added dishes if not exists
+        if "manual_dishes" not in st.session_state:
+            st.session_state.manual_dishes = []
+            
+        if search_query:
+            results = search_dishes_summary(neo4j_service, search_query, limit=10)
+            if results:
+                # Create a selectbox for results
+                options = {d["name"]: d for d in results}
+                selected_to_add = st.sidebar.selectbox("Found dishes", options=list(options.keys()))
+                
+                if st.sidebar.button("Add to Selection"):
+                    dish_to_add = options[selected_to_add]
+                    # Check if already added
+                    if not any(d["dish_id"] == dish_to_add["dish_id"] for d in st.session_state.manual_dishes):
+                        st.session_state.manual_dishes.append(dish_to_add)
+                        st.sidebar.success(f"Added {selected_to_add}")
+                    else:
+                        st.sidebar.warning("Dish already in selection")
+            else:
+                st.sidebar.info("No dishes found")
+        
+        if st.sidebar.button("Clear Selection"):
+            st.session_state.manual_dishes = []
+            st.rerun()
+            
+        dishes_summary = st.session_state.manual_dishes
+        
+        if not dishes_summary:
+             st.info("Search and add dishes to compare.")
 
     if not dishes_summary:
+        if selection_mode == "Manual Search":
+            return
         st.warning("No dishes found with image embeddings in the database.")
         st.info("Please register some dishes first using the API.")
         return

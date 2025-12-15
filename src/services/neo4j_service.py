@@ -1019,6 +1019,49 @@ class Neo4jService:
             result = session.run(query, limit=limit)
             return [dict(record) for record in result]
 
+    def get_random_dishes_summary(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Get a summary of random dishes for selection.
+
+        Args:
+            limit: Maximum number of dishes to return.
+
+        Returns:
+            List of dictionaries with dish_id and name.
+        """
+        query = """
+        MATCH (d:Dish)
+        WHERE d.image_embedding IS NOT NULL
+        RETURN d.dish_id AS dish_id, d.name AS name
+        ORDER BY rand()
+        LIMIT $limit
+        """
+
+        with self.session() as session:
+            result = session.run(query, limit=limit)
+            return [dict(record) for record in result]
+
+    def search_dishes_summary(self, search_query: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Search dishes by name and return summary.
+
+        Args:
+            search_query: String to search in dish names.
+            limit: Maximum number of dishes to return.
+
+        Returns:
+            List of dictionaries with dish_id and name.
+        """
+        query = """
+        MATCH (d:Dish)
+        WHERE d.image_embedding IS NOT NULL AND toLower(d.name) CONTAINS toLower($search_query)
+        RETURN d.dish_id AS dish_id, d.name AS name
+        ORDER BY d.name
+        LIMIT $limit
+        """
+
+        with self.session() as session:
+            result = session.run(query, search_query=search_query, limit=limit)
+            return [dict(record) for record in result]
+
     def get_all_dishes_ingredients(self) -> list[dict[str, Any]]:
         """Get all dishes with their ingredient names for IDF computation.
 
@@ -1581,6 +1624,49 @@ class Neo4jService:
                 limit=limit,
             )
             return [dict(record) for record in result]
+
+    def get_user_liked_dish_embeddings(
+        self,
+        user_id: str,
+        min_rating: int = 4,
+    ) -> list[list[float]]:
+        """Get image embeddings of dishes liked by the user.
+
+        Args:
+            user_id: The user identifier.
+            min_rating: Minimum rating to consider a dish as "liked".
+
+        Returns:
+            List of embedding vectors.
+        """
+        query = """
+        MATCH (u:User {user_id: $user_id})-[r:RATED]->(d:Dish)
+        WHERE r.score >= $min_rating AND d.image_embedding IS NOT NULL
+        RETURN d.image_embedding AS embedding
+        """
+
+        with self.session() as session:
+            result = session.run(query, user_id=user_id, min_rating=min_rating)
+            return [record["embedding"] for record in result]
+
+    def get_rated_dish_ids(self, user_id: str) -> set[str]:
+        """Get IDs of dishes rated by the user.
+
+        Args:
+            user_id: The user identifier.
+
+        Returns:
+            Set of dish IDs.
+        """
+        query = """
+        MATCH (u:User {user_id: $user_id})-[r:RATED]->(d:Dish)
+        RETURN d.dish_id AS dish_id
+        """
+
+        with self.session() as session:
+            result = session.run(query, user_id=user_id)
+            return {record["dish_id"] for record in result}
+
 
     def get_user_dietary_restrictions(self, user_id: str) -> list[str]:
         """Get dietary restrictions for a user.

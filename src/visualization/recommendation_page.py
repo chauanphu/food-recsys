@@ -18,18 +18,18 @@ def api_get_users(api_base_url: str) -> list[dict]:
         st.error(f"Failed to fetch users: {e}")
         return []
 
-def api_get_recommendations(api_base_url: str, user_id: str, method: str) -> dict:
+def api_get_recommendations(api_base_url: str, user_id: str, method: str, metric: str) -> dict:
     """Fetch recommendations for a user."""
     try:
         resp = requests.get(
             f"{api_base_url.rstrip('/')}/users/{user_id}/recommendations",
-            params={"limit": 10, "method": method},
+            params={"limit": 10, "method": method, "metric": metric},
             timeout=20
         )
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
-        st.error(f"Failed to fetch recommendations ({method}): {e}")
+        st.error(f"Failed to fetch recommendations ({method}, {metric}): {e}")
         return {}
 
 def api_get_similar_users(api_base_url: str, user_id: str) -> dict:
@@ -69,10 +69,10 @@ def render_recommendation_card(dish: dict, method: str):
         
         col1, col2 = st.columns([1, 2])
         with col1:
-            score_label = "Predicted Rating" if method != "content_based" else "Jaccard Score"
+            score_label = "Predicted Rating" if "collaborative" in method else "Score"
             st.metric(score_label, f"{dish['predicted_score']:.2f}")
             
-            if method != "content_based":
+            if "collaborative" in method:
                 st.caption(f"Based on {dish['recommender_count']} similar users")
         
         with col2:
@@ -89,15 +89,30 @@ def render_recommendations_page(api_base_url: str = "https://api.foodrecys.capte
     tab1, tab2 = st.tabs(["User Recommendations", "Image Search"])
     
     with tab1:
-        st.markdown("Compare **Collaborative Filtering** (User-based) vs **Content-Based Filtering** (Ingredient-based).")
+        st.markdown("Compare **Collaborative Filtering** (User-based) vs **Content-Based Filtering** (Ingredient/Image-based).")
 
         # User Selection
         users = api_get_users(api_base_url)
         if not users:
             st.warning("No users found. Please ingest users first.")
         else:
-            user_options = {f"{u['name']} ({u['user_id']})": u['user_id'] for u in users}
-            selected_user_label = st.selectbox("Select User", options=list(user_options.keys()))
+            col_user, col_metric = st.columns([2, 1])
+            with col_user:
+                user_options = {f"{u['name']} ({u['user_id']})": u['user_id'] for u in users}
+                selected_user_label = st.selectbox("Select User", options=list(user_options.keys()))
+            
+            with col_metric:
+                metric_option = st.selectbox(
+                    "Similarity Metric",
+                    options=["Jaccard (Set Overlap)", "Embedding (Cosine)"],
+                    help="Jaccard uses set overlap (ingredients/ratings). Embedding uses vector cosine similarity."
+                )
+                # Map UI option to API param
+                metric_param = "jaccard" if "Jaccard" in metric_option else "embedding"
+                # For collaborative, 'embedding' maps to 'cosine' on user vectors
+                cf_metric = "jaccard" if metric_param == "jaccard" else "cosine"
+                # For content-based, 'embedding' maps to 'embedding' (image vectors), 'jaccard' maps to 'jaccard' (ingredients)
+                cb_metric = metric_param
             
             if selected_user_label:
                 selected_user_id = user_options[selected_user_label]
@@ -109,14 +124,14 @@ def render_recommendations_page(api_base_url: str = "https://api.foodrecys.capte
                     # Collaborative Filtering Column
                     with col_cf:
                         st.header("Collaborative Filtering")
-                        st.caption("Recommends dishes liked by similar users.")
+                        st.caption(f"Recommends dishes liked by similar users ({cf_metric}).")
                         
                         with st.spinner("Fetching CF recommendations..."):
-                            cf_data = api_get_recommendations(api_base_url, selected_user_id, "collaborative")
+                            cf_data = api_get_recommendations(api_base_url, selected_user_id, "collaborative", cf_metric)
                             
                         if cf_data:
                             method_used = cf_data.get("method")
-                            if method_used == "popular_fallback":
+                            if "popular_fallback" in method_used:
                                 st.warning("⚠️ Not enough data for collaborative filtering. Showing popular dishes instead.")
                             
                             recs = cf_data.get("recommendations", [])
@@ -127,7 +142,7 @@ def render_recommendations_page(api_base_url: str = "https://api.foodrecys.capte
                                     render_recommendation_card(dish, "collaborative")
                                     
                             # Show similar users
-                            if method_used == "collaborative_filtering":
+                            if "collaborative_filtering" in method_used:
                                 with st.expander("👥 Similar Users"):
                                     sim_data = api_get_similar_users(api_base_url, selected_user_id)
                                     if sim_data and sim_data.get("similar_users"):
@@ -142,15 +157,15 @@ def render_recommendations_page(api_base_url: str = "https://api.foodrecys.capte
                     # Content-Based Filtering Column
                     with col_cb:
                         st.header("Content-Based Filtering")
-                        st.caption("Recommends dishes with ingredients similar to what you like.")
+                        st.caption(f"Recommends dishes similar to what you like ({cb_metric}).")
                         
                         with st.spinner("Fetching CB recommendations..."):
-                            cb_data = api_get_recommendations(api_base_url, selected_user_id, "content_based")
+                            cb_data = api_get_recommendations(api_base_url, selected_user_id, "content_based", cb_metric)
                             
                         if cb_data:
                             recs = cb_data.get("recommendations", [])
                             if not recs:
-                                st.info("No recommendations found. Try rating more dishes with diverse ingredients.")
+                                st.info("No recommendations found. Try rating more dishes.")
                             else:
                                 for dish in recs:
                                     render_recommendation_card(dish, "content_based")
