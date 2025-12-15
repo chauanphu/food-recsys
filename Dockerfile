@@ -17,8 +17,10 @@ COPY main.py .
 COPY *.csv .
 COPY *.json .
 
-# Install dependencies
-RUN pip install --no-cache-dir .
+# Prevent python from writing pyc files
+ENV PYTHONDONTWRITEBYTECODE=1
+# Keep stdout/stderr unbuffered
+ENV PYTHONUNBUFFERED=1
 
 # Create temp directory for uploads
 RUN mkdir -p /tmp/food-recsys/uploads
